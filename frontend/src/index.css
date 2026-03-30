@@ -1,0 +1,95 @@
+﻿@import "tailwindcss";
+
+@theme {
+  /* Surface Architecture (0% Saturation) */
+  --color-surface: #0e0e0e;
+  --color-surface-container-low: #131313;
+  --color-surface-container-lowest: #000000;
+  --color-surface-container-high: #1f1f1f;
+  --color-surface-container-highest: #262626;
+  --color-surface-variant: #262626;
+  --color-background: #0e0e0e;
+  --color-on-background: #ffffff;
+  --color-on-surface: #ffffff;
+  --color-on-surface-variant: #ababab;
+
+  /* Tactical Signals */
+  --color-primary: #9cff93;
+  --color-primary-container: #00fc40;
+  --color-on-primary: #006413;
+  --color-primary-dim: #00ec3b;
+  --color-secondary: #00e3fd;
+  --color-secondary-container: #006875;
+  --color-on-secondary: #004d57;
+  --color-secondary-dim: #00d4ec;
+  --color-tertiary: #ffc15b;
+  --color-tertiary-container: #fcaf00;
+  --color-on-tertiary: #5d3e00;
+  --color-error: #ff7351;
+  --color-error-container: #b92902;
+  --color-on-error: #450900;
+  
+  /* Additional v4 Specific Tokens from Reference */
+  --color-secondary-fixed-dim: #00d7f0;
+  --color-tertiary-fixed: #fcaf00;
+  --color-on-secondary-fixed-variant: #005964;
+  --color-outline-variant: #484848;
+  --color-surface-bright: #2c2c2c;
+  --color-surface-container: #191919;
+
+  /* Typography */
+  --font-headline: "Space Grotesk", sans-serif;
+  --font-body: "JetBrains Mono", monospace;
+  --font-label: "Space Grotesk", sans-serif;
+
+  /* Global Properties */
+  --radius-default: 0rem;
+  --radius-lg: 0rem;
+  --radius-xl: 0rem;
+}
+
+@layer base {
+  * {
+    border-width: 0;
+    border-style: solid;
+    border-radius: var(--radius-default) !important;
+  }
+  
+  body {
+    background-color: var(--color-background);
+    color: var(--color-on-background);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer components {
+  .material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    display: inline-block;
+    line-height: 1;
+  }
+
+  .glow-primary {
+    box-shadow: 0 0 15px rgba(156, 255, 147, 0.3);
+  }
+
+  .glass-module {
+    background-color: color-mix(in srgb, var(--color-surface-variant), transparent 30%);
+    backdrop-filter: blur(20px);
+  }
+
+  /* Tactical Scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background-color: var(--color-surface); }
+  ::-webkit-scrollbar-thumb { background-color: var(--color-outline-variant); }
+  ::-webkit-scrollbar-thumb:hover { background-color: var(--color-primary); }
+}
+
+/* Utilities */
+.zebra-rows > *:nth-child(even) {
+  background-color: var(--color-surface-container-low);
+}
+.zebra-rows > *:nth-child(odd) {
+  background-color: var(--color-surface);
+}

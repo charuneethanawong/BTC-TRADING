@@ -1,0 +1,238 @@
+# SMC Structure Validation v3.2 Configuration
+# 2-Phase Signal Generation with POC, Liquidity Wall, HTF MSS Sync, and Dynamic Trailing SL
+
+# ============================================================
+# PHASE 1: STRUCTURE VALIDATION
+# ============================================================
+structure_validation:
+  enabled: true
+  
+  # Scoring Factors (Total 0-13)
+  factors:
+    body_close_confirmation: 3      # Candle body closes beyond swing level
+    cvd_confirmation: 2             # CVD makes new high/low with price
+    oi_increase: 2                  # Open Interest increases on break
+    displacement_ratio: 2           # Buy/Sell volume ratio > 2.0
+    volume_at_break: 1              # Break candle volume > 1.5x average
+    poc_proximity: 1                # NEW: Break occurs near POC
+    liquidity_wall: 2               # NEW: Liquidity wall support/resistance
+  
+  # Thresholds (scaled for max 13)
+  confirmed_threshold: 8            # Score >= 8 = CONFIRMED BOS (reduced from 9)
+  pending_threshold: 5              # Score 5-7 = PENDING (reduced from 6)
+  # Score < 5 = SWEEP (liquidity sweep only)
+  
+  # Displacement Settings
+  displacement_ratio_threshold: 2.0  # Min buy/sell ratio for displacement
+  
+  # Volume Settings
+  volume_spike_threshold: 1.5        # Min volume ratio vs 20-period average
+  
+  # POC Settings (NEW)
+  use_poc_check: true                # Enable POC proximity check
+  poc_proximity_pct: 0.3             # Max distance from POC (in %)
+  
+  # Liquidity Wall Settings (NEW)
+  use_liquidity_walls: true          # Enable liquidity wall analysis
+  
+  # Pending BOS Settings
+  pending_max_age_seconds: 300       # 5 minutes max for pending BOS
+  pending_confirmation_candles: 2    # Candles needed to confirm pending
+
+# ============================================================
+# LIQUIDITY WALL ANALYZER (NEW)
+# ============================================================
+liquidity_wall:
+  enabled: true
+  
+  # Wall Detection
+  wall_volume_multiplier: 3.0        # Volume must be 3x average to be a wall
+  min_wall_volume: 10.0              # Minimum volume for a wall (BTC)
+  max_distance_pct: 0.5              # Max distance from price (in %)
+  depth_levels: 20                   # Order book depth to analyze
+  
+  # Scoring
+  strong_wall_threshold: 5.0         # Volume ratio for strong wall (Q3)
+  medium_wall_threshold: 4.0         # Volume ratio for medium wall (Q2)
+
+# ============================================================
+# HTF MSS SYNC (NEW - v3.2)
+# ============================================================
+htf_mss:
+  enabled: true
+  
+  # Analysis Settings
+  lookback: 100                      # H1 candles to analyze
+  bos_threshold: 9                   # Min score for H1 BOS
+  
+  # Sync Scoring
+  # H1 CHoCH same direction: +3 pts, confidence 1.3x
+  # H1 BOS same direction: +2 pts, confidence 1.15x
+  # H1 trend aligned: +1 pt, confidence 1.0x
+  # H1 opposed: -2 pts, confidence 0.5x
+  
+  # Entry Filter
+  min_sync_score: -1                 # Minimum sync score to allow entry
+  filter_on_opposed_choch: true      # Block entries when H1 CHoCH opposes
+
+# ============================================================
+# DYNAMIC TRAILING STOP (NEW - v3.2)
+# ============================================================
+trailing_stop:
+  enabled: true
+  
+  # Activation
+  activation_profit_pct: 0.3         # Activate trailing after 0.3% profit
+  
+  # ATR-Based Trailing
+  trail_atr_mult: 1.5                # ATR multiplier for trailing distance
+  
+  # Breakeven
+  breakeven_profit_pct: 0.5          # Move to breakeven after 0.5% profit
+  
+  # Profit Lock
+  min_lock_profit_pct: 0.2           # Minimum profit to lock after trail starts
+  max_trail_distance_pct: 1.0        # Max distance from peak (in %)
+  
+  # Structure-Based Trailing
+  structure_trail_enabled: true      # Trail to recent swing points
+  
+  # Risk-Free Mode
+  risk_free_after_trails: 3          # Lock profit after 3 trail updates
+
+# ============================================================
+# PHASE 2: ENTRY SIGNAL GENERATION
+# ============================================================
+entry_scanner:
+  enabled: true
+  
+  # Minimum Score to Enter (0-10)
+  min_score: 6
+  
+  # Scoring Factors
+  factors:
+    zone_context: 2          # Price in Discount (long) / Premium (short)
+    order_block: 2           # Touched quality OB
+    fvg: 1                   # Touched FVG
+    sweep: 2                 # Liquidity sweep confirmed
+    order_flow: 2            # Imbalance + CVD support direction
+    structure_bonus: 1       # Structure quality >= 8
+  
+  # Quality Thresholds
+  ob_min_quality: 1          # Minimum OB quality to score
+  sweep_min_quality: 2       # Minimum sweep quality to score
+  structure_quality_bonus_threshold: 8  # Structure quality for bonus
+  
+  # EMA 50 Context (NOT in scoring, TP adjustment only)
+  ema_context:
+    enabled: true
+    aligned_tp_multiplier: 1.0     # Normal TP targets
+    opposed_tp_multiplier: 0.7     # Reduced TP targets (30% less)
+
+# ============================================================
+# BOT STATE MANAGEMENT
+# ============================================================
+bot_state:
+  # State History
+  max_history: 100           # Max state changes to keep
+  
+  # Auto Reset
+  auto_reset_after_hours: 4  # Reset to NEUTRAL after X hours of no activity
+  
+  # Pending Expiry
+  pending_expiry_seconds: 300  # 5 minutes
+
+# ============================================================
+# SIGNAL FILTERS (Legacy - kept for backward compatibility)
+# ============================================================
+signal_filters:
+  # Minimum Score
+  min_score: 7               # Legacy v2.x scoring threshold
+  
+  # Risk/Reward
+  min_risk_reward: 2.0
+  
+  # Cooldown
+  signal_cooldown_seconds: 300  # 5 minutes between signals
+  min_price_distance: 100       # Min distance from last entry (USDT)
+  
+  # Spread
+  max_spread: 2000           # Max acceptable spread
+  
+  # Setup Lock
+  setup_lock_seconds: 900    # 15 minutes per setup
+  
+  # Kill Zones (UTC)
+  kill_zones:
+    london_start: "07:00"
+    london_end: "10:00"
+    new_york_start: "12:00"
+    new_york_end: "15:00"
+    kill_zone_only: false    # Set true to only trade in kill zones
+
+# ============================================================
+# STOP LOSS / TAKE PROFIT
+# ============================================================
+stop_loss:
+  method: "atr"              # atr or fixed
+  atr_multiplier: 1.2
+  atr_period: 14
+  min_sl_distance: 80        # USDT
+  max_sl_distance: 200       # USDT
+
+take_profit:
+  method: "smart"            # smart or fixed_rr
+  risk_reward_ratio: 2.0
+  tp1_ratio: 0.5             # 50% of TP distance
+  tp2_ratio: 1.0             # 100% of TP distance
+  tp3_ratio: 1.5             # 150% of TP distance
+  
+  # Counter-Trend Adjustments
+  counter_trend_tp_multiplier: 0.7
+
+# ============================================================
+# RISK MANAGEMENT
+# ============================================================
+risk:
+  risk_per_trade: 0.5        # % of account per trade
+  max_daily_loss: 3.0        # % max loss per day
+  max_weekly_loss: 8.0       # % max loss per week
+  max_positions: 5           # Max concurrent positions
+  max_consecutive_losses: 5  # Max consecutive losses before pause
+
+# ============================================================
+# DATA REQUIREMENTS
+# ============================================================
+data:
+  # CVD Series
+  cvd_series_length: 100     # Keep last 100 CVD values
+  
+  # OI Tracking
+  track_oi: true
+  oi_history_length: 50      # Keep last 50 OI values
+  
+  # Trade Buffer
+  trade_buffer_size: 1000    # Max trades to keep in buffer
+  
+  # Candles
+  min_candles_required: 50   # Min candles for analysis
+  
+  # Timeframes
+  entry_timeframe: "1m"      # Primary timeframe
+  htf_timeframe: "1h"        # Higher timeframe for context
+  htf_trend_ema_period: 50   # EMA period for HTF trend
+
+# ============================================================
+# FEATURE FLAGS
+# ============================================================
+features:
+  use_structure_validation: true   # Enable v3.0 2-phase flow
+  use_ema_context: true            # Use EMA for TP adjustment
+  use_cvd_confirmation: true       # Use CVD for BOS validation
+  use_oi_confirmation: true        # Use OI for BOS validation
+  use_news_filter: true            # Filter signals during news
+  use_htf_sync: true               # Enable HTF MSS Sync (v3.2)
+  use_trailing_stop: true          # Enable Dynamic Trailing SL (v3.2)
+  
+  # Rollback
+  fallback_to_v2_on_error: true    # Fall back to v2.x scoring on error

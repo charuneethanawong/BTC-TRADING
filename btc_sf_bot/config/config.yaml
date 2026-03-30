@@ -1,0 +1,513 @@
+# ============================================================
+# EXCHANGE CONFIGURATION (v4.9 M5 Upgrade)
+# ============================================================
+exchange:
+  symbol: "BTC/USDT:USDT"
+  timeframe: "5m"        # ← FIXED: was "1m" (M1 noise → M5 institutional structure)
+  htf_timeframe: "1h"    # Higher timeframe for HTF bias
+  htf_trend_ema_period: 50  # EMA period for HTF trend
+
+# SMC Structure Validation v3.2 Configuration
+# 2-Phase Signal Generation with POC, Liquidity Wall, HTF MSS Sync, and Dynamic Trailing SL
+
+# ============================================================
+# PHASE 1: STRUCTURE VALIDATION
+# ============================================================
+
+# ============================================================
+# IPA Configuration (v6.0 - Signal Generation Fix)
+# ============================================================
+ipa:
+  score_threshold: 10           # Min gate score (v6.0: maintained at 10)
+  ob_max_distance_atr: 1.0     # v11.1: OB must be within 1.0 ATR from current price
+  ob_body_min_pct: 0.0005      # OB body min size: 0.05% of price (v6.0: maintained)
+  h1_lookback_candles: 50       # H1 candles for EMA analysis (v6.0: increased from 20 for reliable EMA50)
+  volume_spike_min: 1.0         # Volume must be 1.0x 20-bar average (v6.0: maintained)
+  rr_min: 1.0                   # Min risk:reward ratio (v8.1: unified to 1.0)
+
+# ============================================================
+# IOF Configuration (v6.0 - Signal Generation Fix)
+# ============================================================
+iof:
+  score_threshold: 8           # Min gate score (P0-3: raised from 6 to filter low-quality signals)
+  der_min: 0.3                  # DER: 30%+ directional volume = institutional absorption
+  der_strong: 0.6               # DER: 60%+ = strong absorption
+  der_moderate: 0.45            # DER: 45%+ = moderate absorption
+  oi_change_min_pct: 0.1        # Min OI change % for institutional loading
+  wall_threshold_asia: 100000   # $100K wall threshold for ASIA (v6.0: maintained)
+  wall_threshold_london: 200000 # $200K wall threshold for LONDON (v6.0: maintained)
+  wall_threshold_ny: 300000     # $300K wall threshold for NY (v6.0: maintained)
+  wall_max_distance_pct: 0.005  # Max wall distance: 0.5% of price (v6.0: maintained)
+  # v28.2: Anti-spoofing — wall must be stable at least 15s (weekend: 7.5s)
+  min_wall_stability: 15
+  # v9.0: Wall threshold = median_vol_btc * price * multiplier
+  # median_vol ~225 BTC → 225 * 70000 * 0.005 = $78,750 threshold
+  wall_relative_size_multiplier: 0.0005  # v13.3: 0.05% ของ traded volume USD (จาก 0.5%)
+  absolute_min_wall_usd: 50000          # Floor $50K
+
+# ============================================================
+# FRVP Engine Configuration (v11.0)
+# ============================================================
+frvp:
+  lookback: 60           # 60 candles = 5 hours of M5 data
+  price_step: 10          # $10 per bucket
+  va_pct: 0.70           # Value Area = 70% of volume
+  hvn_threshold: 1.5    # HVN = 1.5x median volume
+  lvn_threshold: 0.5     # LVN = 0.5x median volume
+
+# ============================================================
+# IPA_FRVP Configuration (v11.0)
+# ============================================================
+ipa_frvp:
+  score_threshold: 10
+  ob_hvn_bonus: 3        # OB + HVN = +3
+  ob_only_score: 1       # OB without HVN = +1
+  hvn_tolerance: 20      # $20 tolerance for HVN check
+
+# ============================================================
+# IOF_FRVP Configuration (v11.0)
+# ============================================================
+iof_frvp:
+  score_threshold: 8
+  wall_hvn_bonus: 2      # Wall + HVN = +2
+  lvn_tp_extend: true    # LVN breakout → extend TP to next HVN
+
+# ============================================================
+# SIGNAL FILTERS (Section 7.1 — IPA/IOF + backward compat)
+# ============================================================
+signal_filters:
+  # IPA/IOF cooldown (v4.9 M5)
+  cooldown_price_distance_asia: 50        # $50 price move to reset cooldown (ASIA)
+  cooldown_price_distance_standard: 80    # $80 price move to reset cooldown (LONDON/NY)
+  cooldown_time_fallback_minutes: 30      # Fallback time-based cooldown
+  htf_opposition_block_score_threshold: 12 # Block if H1 opposes with score >= 12
+
+  # Legacy v3 score / RR (kept for SignalManagerV3 backward compat)
+  min_score: 7
+  min_risk_reward: 2.0
+  signal_cooldown_seconds: 60
+  min_price_distance: 0
+  max_spread: 2000
+  setup_lock_seconds: 900
+  zone_expiry_minutes: 30
+
+  # Kill Zones (UTC)
+  kill_zones:
+    london_start: "07:00"
+    london_end: "10:00"
+    new_york_start: "12:00"
+    new_york_end: "15:00"
+    kill_zone_only: false
+structure_validation:
+  enabled: true
+   
+  # Fractal Parameters (v6.0 - Signal Generation Fix)
+  # H1 uses n=5 (5 candles = 5 hours each side) for major structural swings
+  # M5 uses n=2 (2 candles = 10 minutes each side) — v6.0 maintained
+  h1_fractal_n: 5
+  m5_fractal_n: 2   # v6.0: maintained (was 5 in older versions)
+  
+  # Liquidity Sweep Detection (v4.8)
+  # 0.1% threshold is appropriate for BTC's volatility
+  liq_sweep_pct: 0.001
+  
+  # CHoCH Settings (v4.8)
+  choch_pending_max_candles: 10
+  choch_require_htf_alignment: true
+  
+  # Broadening/Contracting (v4.8)
+  # Broadening (HH+LL) = range expansion, Contracting (LH+HL) = consolidation
+  broadening_range_threshold: 2
+  contracting_range_threshold: 3
+  
+  # Scoring Factors (Total 0-13)
+  factors:
+    body_close_confirmation: 3      # Candle body closes beyond swing level
+    cvd_confirmation: 2             # CVD makes new high/low with price
+    oi_increase: 2                  # Open Interest increases on break
+    displacement_ratio: 2           # Buy/Sell volume ratio > 2.0
+    volume_at_break: 1              # Break candle volume > 1.5x average
+    poc_proximity: 1                # NEW: Break occurs near POC
+    liquidity_wall: 2               # NEW: Liquidity wall support/resistance
+  
+  # Thresholds (scaled for max 13)
+  confirmed_threshold: 8            # Score >= 8 = CONFIRMED BOS (reduced from 9)
+  pending_threshold: 5              # Score 5-7 = PENDING (reduced from 6)
+  # Score < 5 = SWEEP (liquidity sweep only)
+  
+  # Displacement Settings
+  displacement_ratio_threshold: 2.0  # Min buy/sell ratio for displacement
+  
+  # Volume Settings
+  volume_spike_threshold: 1.5        # Min volume ratio vs 20-period average
+  
+  # POC Settings (NEW)
+  use_poc_check: true                # Enable POC proximity check
+  poc_proximity_pct: 0.3             # Max distance from POC (in %)
+  
+  # Liquidity Wall Settings (NEW)
+  use_liquidity_walls: true          # Enable liquidity wall analysis
+  
+  # Pending BOS Settings
+  pending_max_age_seconds: 300       # 5 minutes max for pending BOS
+  pending_confirmation_candles: 2    # Candles needed to confirm pending
+
+# ============================================================
+# LIQUIDITY WALL ANALYZER (NEW)
+# ============================================================
+liquidity_wall:
+  enabled: true
+  
+  # Wall Detection
+  wall_volume_multiplier: 3.0        # Volume must be 3x average to be a wall
+  min_wall_volume: 10.0              # Minimum volume for a wall (BTC)
+  max_distance_pct: 0.5              # Max distance from price (in %)
+  depth_levels: 20                   # Order book depth to analyze
+  
+  # Scoring
+  strong_wall_threshold: 5.0         # Volume ratio for strong wall (Q3)
+  medium_wall_threshold: 4.0         # Volume ratio for medium wall (Q2)
+
+# ============================================================
+# INSTITUTIONAL FLOW ANALYSIS (v4.0)
+# ============================================================
+institutional_flow:
+  enabled: true
+  
+  # LP (Liquidity Purge) Configuration
+  lp_delta_spike_threshold: 2.5      # Delta ratio threshold for absorption
+  lp_oi_change_min: 0.5             # Min OI change % for institutional loading
+  lp_der_threshold: 3.0             # DER threshold for exhaustion detection
+  
+  # DB (Defensive Block) Configuration
+  db_refill_ratio: 1.2              # Wall refill ratio (Iceberg behavior)
+  db_persistence: 30                 # Min wall persistence in seconds
+  db_obi_threshold: 0.7             # Order Book Imbalance threshold
+  db_min_wall_value_usd: 500000     # Min wall size for DB detection ($500K)
+  
+  # DA (Delta Absorption) Configuration
+  da_der_threshold: 3.0             # Delta Efficiency Ratio threshold
+  da_mss_confirmation_required: true # Require MSS confirmation before signal
+  da_cvd_threshold: 0.15           # CVD delta threshold for gate
+  
+  # Rejection Velocity Check (LP Pattern)
+  rejection_velocity_threshold: 0.5  # Min velocity for valid rejection (% per second)
+
+# ============================================================
+# MARKET REGIME (v27.1, v30.6 - BTC calibrated)
+# ============================================================
+market_regime:
+  weakening_di_spread_max: 10.0    # DI spread < this = directional momentum fading
+  weakening_atr_ratio_max: 0.75    # ATR(5)/ATR(14) < this = volatility contracting
+  # v30.6: BB width thresholds calibrated for BTC M5 (was using Forex defaults)
+  bb_dead_threshold: 0.003         # BB width < 0.3% = truly dead (range < $200)
+  bb_volatile_threshold: 0.015     # BB width > 1.5% = volatile (range > $1000)
+
+# ============================================================
+# ANALYSIS INTERVALS (v27.2 Smart Interval)
+# ============================================================
+analysis:
+  iof_interval_seconds: 15         # IOF/IOFF: order flow check (real-time data)
+  # IPA/IPAF + AI: triggered by M5 candle close (every 5 minutes) — no config needed
+
+# ============================================================
+# ATR-Based SL/TP (NEW - adapts to volatility)
+# ============================================================
+htf_mss:
+  enabled: true
+  
+  # Analysis Settings
+  lookback: 100                      # H1 candles to analyze
+  bos_threshold: 9                   # Min score for H1 BOS
+  
+  # Sync Scoring
+  # H1 CHoCH same direction: +3 pts, confidence 1.3x
+  # H1 BOS same direction: +2 pts, confidence 1.15x
+  # H1 trend aligned: +1 pt, confidence 1.0x
+  # H1 opposed: -2 pts, confidence 0.5x
+  
+  # Entry Filter
+  min_sync_score: -1                 # Minimum sync score to allow entry
+  filter_on_opposed_choch: true      # Block entries when H1 CHoCH opposes
+
+# ============================================================
+# DYNAMIC TRAILING STOP (NEW - v3.2)
+# ============================================================
+trailing_stop:
+  enabled: false      # EA now handles this independently
+  
+  # Activation
+  activation_profit_pct: 0.3         # Activate trailing after 0.3% profit
+  
+  # ATR-Based Trailing
+  trail_atr_mult: 1.5                # ATR multiplier for trailing distance
+  tighten_trail_atr_mult: 0.4        # V-09: ATR multiplier when TIGHTEN_TRAIL action triggered
+  
+  # Breakeven (Institutional Breakeven+)
+  breakeven_profit_pct: 0.4          # Move to breakeven after 0.4% profit
+  breakeven_buffer_pct: 0.1          # Breakeven+ buffer to cover commissions
+  
+  # Profit Lock
+  min_lock_profit_pct: 0.2           # Minimum profit to lock after trail starts
+  max_trail_distance_pct: 1.0        # Max distance from peak (in %)
+  
+  # Structure-Based Trailing
+  structure_trail_enabled: true      # Trail to recent swing points
+  
+  # Risk-Free Mode
+  risk_free_after_trails: 3          # Lock profit after 3 trail updates
+
+# ============================================================
+# PHASE 2: ENTRY SIGNAL GENERATION
+# ============================================================
+entry_scanner:
+  enabled: true
+  
+  # Re-entry time expiry (reduced to match SmartFlow cooldown)
+  reentry_time_expiry: 2   # 2 minutes (was 20 min)
+  
+  # Minimum price distance to allow re-entry
+  min_pattern_distance: 50   # $50 (was $150)
+  
+  # Minimum Score to Enter (0-10)
+  min_score: 6
+  
+  # Scoring Factors
+  factors:
+    zone_context: 2          # Price in Discount (long) / Premium (short)
+    order_block: 2           # Touched quality OB
+    fvg: 1                   # Touched FVG
+    sweep: 2                 # Liquidity sweep confirmed
+    order_flow: 2            # Imbalance + CVD support direction
+    structure_bonus: 1       # Structure quality >= 8
+  
+  # Quality Thresholds
+  ob_min_quality: 1          # Minimum OB quality to score
+  sweep_min_quality: 2       # Minimum sweep quality to score
+  structure_quality_bonus_threshold: 8  # Structure quality for bonus
+  
+  # EMA 50 Context (NOT in scoring, TP adjustment only)
+  ema_context:
+    enabled: true
+    aligned_tp_multiplier: 1.0     # Normal TP targets
+    opposed_tp_multiplier: 0.7     # Reduced TP targets (30% less)
+
+# ============================================================
+# BOT STATE MANAGEMENT
+# ============================================================
+bot_state:
+  # State History
+  max_history: 100           # Max state changes to keep
+  
+  # Auto Reset
+  auto_reset_after_hours: 4  # Reset to NEUTRAL after X hours of no activity
+  
+  # Pending Expiry
+  pending_expiry_seconds: 300  # 5 minutes
+
+# ============================================================
+# SL/TP v6.1 CONFIGURATION (Session-adaptive ATR + Smart TP)
+# ============================================================
+sl:
+  ipa_base_mult: 1.0              # IPA: ATR × 1.0 (structural OB → less buffer)
+  iof_base_mult: 1.2              # IOF: ATR × 1.2 (wall → more buffer)
+  min_atr: 0.8                    # Safety minimum: 0.8× ATR
+  max_atr: 1.5                    # Safety maximum: 1.5× ATR
+  absolute_min_sl_pct: 0.002     # v7.0 Bug#3: 0.2% of entry price (scales with BTC price)
+  session_scale:                  # Session-adaptive multiplier
+    ASIA: 0.85
+    LONDON: 1.0
+    LONDON-NY: 1.15
+    NY: 1.1
+    ASIA-LATE: 0.85
+
+tp:
+  tp1_rr_min: 0.8                 # TP1 (BE trigger): nearest magnet with RR >= 0.8
+  tp2_rr_min: 1.2                 # TP2 (actual TP): next magnet with RR >= 1.2
+  tp1_atr_fallback: 1.2           # v9.2: TP1 ATR fallback (was 1.0 — ensures RR >= 1.2)
+  tp2_atr_fallback: 1.8           # v9.2: TP2 ATR fallback (was 1.5 — ensures RR >= 1.2)
+  move_sl_to_be: true             # EA moves SL to breakeven when TP1 reached
+
+# ============================================================
+# ISF MODE CONFIGURATION
+# ============================================================
+isf:
+  enabled: true
+  
+  # Score Thresholds (0-20 scale)
+  # ลดลงจากเดิม (12, 12, 13) เพื่อให้สัญญาณผ่านง่ายขึ้น
+  threshold_sweep: 10        # Mode A: SWEEP (was 12)
+  threshold_wall: 10         # Mode B: WALL (was 12)
+  threshold_inst: 11         # Mode C: INST (was 13)
+  
+  # High confidence threshold for aggressive sizing
+  isf_high_conf_threshold: 16
+
+# ============================================================
+# SMART FLOW MODE (v8.1 - DEPRECATED)
+# LP/DB/DA patterns removed — IOF Analyzer used instead
+# ============================================================
+smart_flow:
+  enabled: false  # v8.1: Disabled — use IOF Analyzer for order flow signals
+  atr_filter_enabled: true
+  atr_volatility_scale_min: 0.8   # v6.0: was 0.7 (less aggressive in low vol)
+  atr_volatility_scale_max: 1.1   # v6.0: was 1.3 (less aggressive in high vol)
+  
+  # Institutional Confluence Score
+  # +5 bonus if micro-flow signals are 100% aligned
+  institutional_confluence_bonus: 5
+  institutional_confluence_enabled: true
+
+  # News Filter Gate
+  # Block DB/DA signals during high-impact news (15 min window)
+  news_filter_enabled: true
+  news_pause_before_minutes: 15
+  news_pause_after_minutes: 15
+  news_filter_patterns: ['DB', 'DA']  # Patterns to block during news
+
+  # Price-Distance Based Cooldown (v6.0: reduced from $100 to $50)
+  # Pattern can trade when price has moved $X away from last trade
+  # v6.0: Allows faster signal generation in low volatility
+  cooldown_price_distance: 50    # v6.0: was 100 (price movement to reset cooldown)
+  
+  # ATR-Based SL/TP (NEW - adapts to volatility)
+  # SL = ATR × mult, TP = ATR × mult (RR = tp_mult / sl_mult)
+  atr_sl_mult:
+    LP: 1.5              # Conservative for trend-following
+    DB: 1.2               # Moderate
+    DA: 0.8               # Aggressive for scalp
+  atr_tp_mult:
+    LP: 3.0              # RR 2.0 (3.0/1.5)
+    DB: 2.4               # RR 2.0 (2.4/1.2)
+    DA: 1.2               # RR 1.5 (1.2/0.8)
+  
+  # Fallback Fixed SL/TP (when ATR unavailable)
+  sl_lp: 1000            # $10 SL for Liquidity Purge
+  sl_db: 1000             # $10 SL for Defensive Block
+  sl_da: 600              # $6 SL for Delta Absorption
+  
+  tp_lp: 2000            # RR 2.0 ($20 TP)
+  tp_db: 2000             # RR 2.0 ($20 TP)
+  tp_da: 720              # RR 1.2 ($7.2 TP)
+  
+  # Features
+  use_binance: true         # ใช้ Binance Data (OI, Walls, CVD)
+  max_patterns_per_scan: 3  # สูงสุด 3 patterns ต่อครั้ง
+  
+  # DEPRECATED: Time-based cooldowns (no longer used)
+  # Kept for backward compatibility only
+  cooldown_sweep: 0
+  cooldown_wall: 0
+  cooldown_zone: 0
+
+# ============================================================
+# STOP LOSS / TAKE PROFIT - MODE SPECIFIC
+# ============================================================
+
+# Mode A: ISF_SWEEP (เน้น Pattern + P1 Confirmation)
+# - SL แคบ (เผื่อ spread $8-10)
+# - RR ปานกลาง (2.0) แบ่ง TP 2 ระดับ
+# - TP1: 1.0x SL (50% position) - เก็บกำไรเร็ว
+# - TP2: 1.5x SL (50% position) - รับ trend ต่อ
+isf_sweep:
+  min_sl_distance: 800       # $8 minimum (tighter!)
+  max_sl_distance: 1200      # $12 maximum (was $20 - too wide)
+  risk_reward_ratio: 2.0     # Medium RR (reduced from 2.5)
+  tp_multiplier: 1.0
+  tp1_ratio: 1.0             # TP1 at 1.0x SL (50% position)
+  tp2_ratio: 1.5             # TP2 at 1.5x SL (50% position)
+
+# Mode B: ISF_WALL (เน้น Wall Defense + Absorption)
+# - SL แคบ (เผื่อ spread $8-10)
+# - RR ปานกลาง (1.5-2.0)
+isf_wall:
+  min_sl_distance: 800       # $8 minimum (was $18 - too wide)
+  max_sl_distance: 1200      # $12 maximum (was $20 - too wide)
+  risk_reward_ratio: 2.0     # Medium RR
+  tp_multiplier: 1.0
+
+# Mode C: ISF_INST (เน้น Pure Flow ใน Zone สำคัญ)
+# - SL ultra-tight (เหนือ/ใต้โซน 4-8$ เท่านั้น)
+# - RR ต่ำ (1.2) แต่ Win Rate สูงมาก
+isf_inst:
+  min_sl_distance: 400       # $4 minimum (ultra-tight!)
+  max_sl_distance: 800       # $8 maximum (just outside zone)
+  zone_buffer: 400           # $4 buffer from zone boundary
+  risk_reward_ratio: 1.2     # Low RR but ultra-high win rate
+  tp_multiplier: 1.0         # Standard TP
+
+# Legacy config (fallback)
+stop_loss:
+  method: "atr"
+  atr_multiplier: 1.2
+  atr_period: 14
+
+take_profit:
+  method: "smart"
+  tp1_ratio: 0.5
+  tp2_ratio: 1.0
+  tp3_ratio: 1.5
+  counter_trend_tp_multiplier: 0.7
+
+# ============================================================
+# RISK MANAGEMENT
+# ============================================================
+risk:
+  risk_per_trade: 0.5        # % of account per trade
+  max_daily_loss: 5.0        # % max loss per day
+  max_weekly_loss: 10.0      # % max loss per week
+  max_positions: 5          # Max concurrent positions
+  max_consecutive_losses: 5  # Max consecutive losses
+  
+# การตั้งค่า Drawdown Tiers (ตั้งสูงเพื่อปิดการใช้งาน)
+drawdown_protection:
+  enabled: true              # true = เปิด drawdown protection
+  tier_1_threshold: 2.0      # % drawdown threshold for tier 1 response
+  tier_2_threshold: 4.0      # % drawdown threshold for tier 2 response
+  tier_3_threshold: 6.0      # % drawdown threshold for tier 3 response
+
+# ============================================================
+# DATA REQUIREMENTS
+# ============================================================
+data:
+  # CVD Series
+  cvd_series_length: 100     # Keep last 100 CVD values
+  
+  # OI Tracking
+  track_oi: true
+  oi_history_length: 50      # Keep last 50 OI values
+  
+  # Trade Buffer
+  trade_buffer_size: 1000    # Max trades to keep in buffer
+  
+  # Candles
+  min_candles_required: 50   # Min candles for analysis
+  
+  # Timeframes (Deprecated - use exchange.timeframe above instead)
+  entry_timeframe: "5m"      # Primary timeframe (← FIXED: was "1m")
+  htf_timeframe: "1h"        # Higher timeframe for context
+  htf_trend_ema_period: 50   # EMA period for HTF trend
+
+# ============================================================
+# FEATURE FLAGS
+# ============================================================
+features:
+  use_structure_validation: true   # Enable v3.0 2-phase flow
+  use_ema_context: true            # Use EMA for TP adjustment
+  use_cvd_confirmation: true       # Use CVD for BOS validation
+  use_oi_confirmation: true        # Use OI for BOS validation
+  use_news_filter: false           # EA now handles suppression; Python only broadcasts
+  use_htf_sync: true               # Enable HTF MSS Sync (v3.2)
+  use_trailing_stop: true          # Enable Dynamic Trailing SL (v3.2)
+  
+  # Rollback
+  fallback_to_v2_on_error: true    # Fall back to v2.x scoring on error
+
+# ============================================================
+# ALERTS (Telegram)
+# ============================================================
+alerts:
+  telegram:
+    enabled: true                   # เปิดใช้งาน Telegram alerts
+  mt5_webhook:
+    enabled: false                  # เปิดใช้งาน MT5 webhook (ถ้ามี)

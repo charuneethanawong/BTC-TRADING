@@ -1,0 +1,61 @@
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "H1 emas inverted (EMA50>9), M5 sell vol high, wall bid weak vs DER sell", "key_level": 0.0, "timestamp": "2026-03-28T18:40:25.791025+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "CAUTION", "reason": "EMA cascade bearish (9<20<50) but price above EMAs, DER zero, walls light", "key_level": 0.0, "timestamp": "2026-03-28T18:44:37.248886+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "WAIT", "reason": "H1 EMA bearish cascade (67250>66615<66711), M5 flow indecisive, ASK wall 7x blocks rallies", "key_level": 0.0, "timestamp": "2026-03-28T18:50:20.729206+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA cascade bearish (9<20<50), ASK wall 2.2x, delta neg -0.2, ranging ADX 25", "key_level": 0.0, "timestamp": "2026-03-28T19:15:11.630703+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA cascade broken, wall BID 2.5x defense, M5 structure weak", "key_level": 0.0, "timestamp": "2026-03-28T19:31:24.662849+00:00"}
+{"bias": "NEUTRAL", "confidence": 40, "action": "WAIT", "reason": "EMA cascade broken (9>20<50), ranging regime, DER 0.36 weak", "key_level": 0.0, "timestamp": "2026-03-28T19:35:16.618690+00:00"}
+{"bias": "NEUTRAL", "confidence": 40, "action": "WAIT", "reason": "EMA misaligned RANGING, wall ASK 67.8x, m5 mixed", "key_level": 0.0, "timestamp": "2026-03-28T20:05:34.939588+00:00"}
+{"bias": "NEUTRAL", "confidence": 35, "action": "WAIT", "reason": "H1 EMAs conflicting, low ADX 25, DER 0.000", "key_level": 0.0, "timestamp": "2026-03-28T20:06:06.278011+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA9>EMA20<50, ranging, ASK wall 42x", "key_level": 0.0, "timestamp": "2026-03-28T20:11:56.030588+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA9>EMA20 but below EMA50, ranging, large bid wall at 73.4x", "key_level": 0.0, "timestamp": "2026-03-28T20:52:17.454807+00:00"}
+{"bias": "NEUTRAL", "confidence": 40, "action": "WAIT", "reason": "EMA alignment mixed, DER strong but M5 candles conflicted", "key_level": 0.0, "timestamp": "2026-03-28T20:55:14.575570+00:00"}
+{"bias": "BEARISH", "confidence": 40, "action": "CAUTION", "reason": "H1 EMA cascade broken, DER 0.0 + ASK wall 3.3x, m5 recent bearish structure", "key_level": 0.0, "timestamp": "2026-03-28T21:08:12.626649+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA cascade broken, -2231 delta, ASK wall 2.9x, DER 0.993 strong sell flow", "key_level": 0.0, "timestamp": "2026-03-28T21:10:10.336998+00:00"}
+{"bias": "NEUTRAL", "confidence": 35, "action": "WAIT", "reason": "EMA cascade broken, H1 trend ranging, DER high but wall small", "key_level": 0.0, "timestamp": "2026-03-28T21:15:13.714559+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "WAIT", "reason": "EMA cascade broken, DER strong but delta -730.6, wall BID 27.1x", "key_level": 0.0, "timestamp": "2026-03-28T21:20:16.344141+00:00"}
+{"bias": "BEARISH", "confidence": 68, "action": "CAUTION", "reason": "EMA cascade bearish, DER low, delta neg, wall weak", "key_level": 0.0, "timestamp": "2026-03-28T21:25:20.422365+00:00"}
+{"bias": "BEARISH", "confidence": 55, "action": "WAIT", "reason": "H1 EMA bear cascade, wall ASK, pullback to EMA9 complete", "key_level": 0.0, "timestamp": "2026-03-28T21:30:04.035933+00:00"}
+{"bias": "NEUTRAL", "confidence": 38, "action": "WAIT", "reason": "EMA cascade broken, weak DER, negative delta, ranging H1", "key_level": 0.0, "timestamp": "2026-03-28T21:35:07.762064+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA cascade broken, DER 0.71 strong sell flow, h1 candle bearish", "key_level": 0.0, "timestamp": "2026-03-28T21:40:12.679780+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA cascade broken, H1 down candle, weak DER, delta negative", "key_level": 0.0, "timestamp": "2026-03-28T21:45:20.675721+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "H1 EMA cascade broken, strong ASK wall 3.2x, delta -7.3", "key_level": 0.0, "timestamp": "2026-03-28T21:50:23.976365+00:00"}
+{"bias": "BEARISH", "confidence": 72, "action": "CAUTION", "reason": "EMA cascade broken, der 1 delta -1053 wall BID 2.1x", "key_level": 0.0, "timestamp": "2026-03-28T21:55:19.618194+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA50>price>EMA9>EMA20, -225 delta, ASK wall", "key_level": 0.0, "timestamp": "2026-03-28T22:00:04.376811+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "CAUTION", "reason": "H1 EMA conflict, weak ADX 25, DER 0.89 shows bid wall but trend mixed", "key_level": 0.0, "timestamp": "2026-03-28T22:05:10.137955+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA bearish split, strong bid wall 61.4x, large sell delta -3681", "key_level": 0.0, "timestamp": "2026-03-28T22:10:14.091540+00:00"}
+{"bias": "BEARISH", "confidence": 68, "action": "CAUTION", "reason": "H1 EMA cascade broken, delta -4230, last M5 \u25bc104b64%\u2191", "key_level": 0.0, "timestamp": "2026-03-28T22:15:20.846674+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA50 resistance strong, H1 sell vol 66%, ASK wall 1.5x despite +delta", "key_level": 0.0, "timestamp": "2026-03-28T22:20:06.101875+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "H1 ETL broken (EMA9>20<50). DER 0.43, neg delta. Ranging.", "key_level": 0.0, "timestamp": "2026-03-28T22:25:10.272213+00:00"}
+{"bias": "NEUTRAL", "confidence": 35, "action": "CAUTION", "reason": "Ranging, mixed H1 EMAs, low ADX, DER>0.6 but delta -3.9, M5 flow choppy", "key_level": 0.0, "timestamp": "2026-03-28T22:30:16.110675+00:00"}
+{"bias": "BEARISH", "confidence": 62, "action": "CAUTION", "reason": "EMA9>EMA20<50=no cascade, H1 sells 66%, der low", "key_level": 0.0, "timestamp": "2026-03-28T22:35:04.860736+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "EMA20<EMA50 bearish structure, m5 mixed flow, DER 0.987 strong, delta +728", "key_level": 0.0, "timestamp": "2026-03-28T22:40:09.906376+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "WAIT", "reason": "EMA alignment broken, RANGING low ADX, DER 0.306 retail noise", "key_level": 0.0, "timestamp": "2026-03-28T22:45:13.578234+00:00"}
+{"bias": "BEARISH", "confidence": 68, "action": "CAUTION", "reason": "EMA50 > EMA9, ask wall 2.4x, strong m5 sell candle 70$ 92%\u2193", "key_level": 0.0, "timestamp": "2026-03-28T22:50:19.225631+00:00"}
+{"bias": "NEUTRAL", "confidence": 44, "action": "WAIT", "reason": "EMA alignment mixed, DER strong but delta -0.8, ranging regime", "key_level": 0.0, "timestamp": "2026-03-28T22:55:24.407137+00:00"}
+{"bias": "BEARISH", "confidence": 55, "action": "CAUTION", "reason": "EMA9>EMA20<50=ranging, DER high, M5 flow weak & inconsistent", "key_level": 0.0, "timestamp": "2026-03-28T23:00:09.229486+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "WAIT", "reason": "EMA cascade broken H1 66723>66665<67127, DER 0.55, delta -1.3", "key_level": 0.0, "timestamp": "2026-03-28T23:05:13.336873+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "WAIT", "reason": "EMA cascade broken, ADX 25, DER 0.79 but delta -16.8", "key_level": 0.0, "timestamp": "2026-03-28T23:10:17.694623+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "WAIT", "reason": "H1 EMAs conflict, DER 0.0, low conviction", "key_level": 0.0, "timestamp": "2026-03-28T23:14:40.112349+00:00"}
+{"bias": "BEARISH", "confidence": 73, "action": "CAUTION", "reason": "EMA9<50 bearish, H1 sell order flow 66%, DER strong but -delta", "key_level": 0.0, "timestamp": "2026-03-28T23:15:20.912719+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "CAUTION", "reason": "EMA cascade broken, DER weak, ranging ADX 25, wall vs flow conflict", "key_level": 0.0, "timestamp": "2026-03-28T23:20:23.496525+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "H1 EMA bearish alignment, M5 downtrend, DER 0.425 neutral, ASK wall", "key_level": 0.0, "timestamp": "2026-03-28T23:25:08.714483+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "CAUTION", "reason": "Mixed: bear delta -139, H1 EMAs conflict, low ADX 25", "key_level": 0.0, "timestamp": "2026-03-28T23:30:17.451523+00:00"}
+{"bias": "NEUTRAL", "confidence": 35, "action": "CAUTION", "reason": "Mixed signals: bullish m5 marubozu but bearish DER, delta, H1 EMA cascade broken", "key_level": 0.0, "timestamp": "2026-03-28T23:56:07.289931+00:00"}
+{"bias": "BEARISH", "confidence": 64, "action": "CAUTION", "reason": "H1 bear cascade, DER 0.88 strong sell flow, M5 EMA test", "key_level": 0.0, "timestamp": "2026-03-29T01:10:28.561713+00:00"}
+{"bias": "NEUTRAL", "confidence": 35, "action": "WAIT", "reason": "H1 bear cascade, M5 DER strong but wall+marubozu bear, delta neg. Ranging", "key_level": 0.0, "timestamp": "2026-03-29T02:20:09.528656+00:00"}
+{"bias": "NEUTRAL", "confidence": 55, "action": "WAIT", "reason": "EMA cascade broken, DER strong but -delta & bid wall amid ranging", "key_level": 0.0, "timestamp": "2026-03-29T02:52:43.883519+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "WAIT", "reason": "EMA misalignment H1, M5 range, DER strong but delta negative, low ADX", "key_level": 0.0, "timestamp": "2026-03-29T03:37:17.024232+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "H1 structure broken, M5 bear marubozu, delta -1596, ASK wall", "key_level": 0.0, "timestamp": "2026-03-29T03:41:22.907058+00:00"}
+{"bias": "BEARISH", "confidence": 67, "action": "CAUTION", "reason": "DER 1.0, delta -188, wall ASK 1.4x, bear marubozu", "key_level": 0.0, "timestamp": "2026-03-29T03:43:55.876501+00:00"}
+{"bias": "NEUTRAL", "confidence": 35, "action": "CAUTION", "reason": "H1 EMAs bear cascade broken, M5 ranging ER low, wall ASK 1.1x ema_dist 0.3%", "key_level": 0.0, "timestamp": "2026-03-29T03:56:07.376833+00:00"}
+{"bias": "BEARISH", "confidence": 45, "action": "CAUTION", "reason": "H1 cascade broken, MAJOR ASK wall 6x, dead regime, M5 below EMAs", "key_level": 0.0, "timestamp": "2026-03-29T05:42:10.289651+00:00"}
+{"bias": "BEARISH", "confidence": 72, "action": "WAIT", "reason": "H1 EMAs bearish cascade forming, M5 MARUBOZU_BEAR + large negative delta", "key_level": 0.0, "timestamp": "2026-03-29T08:00:22.115769+00:00"}
+{"bias": "BEARISH", "confidence": 45, "action": "CAUTION", "reason": "EMA cascade dead, bid wall + delta neg, RANGING ER low", "key_level": 0.0, "timestamp": "2026-03-29T08:45:19.658528+00:00"}
+{"bias": "NEUTRAL", "confidence": 45, "action": "WAIT", "reason": "EMA conflict, weak DER, H1 bearish cascade broken", "key_level": 0.0, "timestamp": "2026-03-29T08:46:36.916391+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "H1 bearish cascade, M5 engulfing in ranging mkt, weak DER(0.756) vs wall", "key_level": 0.0, "timestamp": "2026-03-29T10:27:50.574748+00:00"}
+{"bias": "BEARISH", "confidence": 78, "action": "WAIT", "reason": "H1 cascade bearish, DER 0.544 weak conviction, marubozu in range low", "key_level": 0.0, "timestamp": "2026-03-29T10:38:09.245831+00:00"}
+{"bias": "BEARISH", "confidence": 65, "action": "CAUTION", "reason": "H1 EMA dead, weak M5 ER, wall ASK 2.1x, bulls fading", "key_level": 0.0, "timestamp": "2026-03-29T11:22:53.569209+00:00"}
+{"bias": "NEUTRAL", "confidence": 35, "action": "WAIT", "reason": "EMA cascade broken, m5 star negative, DER low 0.38, delta neg", "key_level": 0.0, "timestamp": "2026-03-29T12:04:46.399722+00:00"}
+{"bias": "NEUTRAL", "confidence": 50, "action": "WAIT", "reason": "EMA cascade bearish, DER weak, ADX13", "key_level": 0.0, "timestamp": "2026-03-29T14:25:47.698162+00:00"}
+{"bias": "BEARISH", "confidence": 75, "action": "WAIT", "reason": "EMA cascade bearish, DER fading, delta -1268.9, pullback low conviction", "key_level": 0.0, "timestamp": "2026-03-29T14:26:27.572172+00:00"}
+{"bias": "BEARISH", "confidence": 78, "action": "TRADE", "reason": "EMA cascade bearish, DER 0.935+wall bid, M5 marubozu bear in pullback", "key_level": 0.0, "timestamp": "2026-03-29T14:35:15.832954+00:00"}

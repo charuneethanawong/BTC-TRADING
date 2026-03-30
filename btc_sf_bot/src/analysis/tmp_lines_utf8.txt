@@ -1,0 +1,100 @@
+﻿                wall_price=wall_result['wall_price'],
+                wall_size_usd=wall_result['wall_size_usd'],
+                der_score=delta_result['der'],
+                oi_change_pct=oi_result['oi_change_pct'],
+                funding_rate=binance_data.get('funding_rate', 0.0),
+                volume_ratio=delta_result['volume_ratio'],
+                rejection_candle=rejection,
+                liquidation_cascade=binance_data.get('liquidation_cascade', False),
+                wall_refill=wall_result.get('refill_confirmed', False),
+                wall_stability_seconds=wall_result.get('stability_seconds', 0),
+                atr_m5=self.atr_m5,
+                rr_target=rr_target,
+                volume_spike=delta_result['volume_ratio'] >= 1.2,
+                session=session,
+                score_breakdown=breakdown,
+                next_resistance=levels.get('resistance'),
+                next_support=levels.get('support'),
+                signal_type=delta_result['signal_type'],  # v9.6: MOMENTUM or ABSORPTION
+                reversal_mode=getattr(self, '_reversal_mode', 'STRUCTURAL'),  # v15.9
+                custom_magnets=None,  # v15.9: Standard IOF doesn't use custom magnets
+            )
+
+            self.logger.debug(f"{self.log_prefix} Analysis result: {result}")
+            return result
+
+        except Exception as e:
+            self.logger.error(f"{self.log_prefix} Analysis error: {e}", exc_info=True)
+            return None
+
+    def _check_delta_absorption(self, candles_m5: pd.DataFrame, binance_data: Dict,
+                                wall_scan: Optional[Dict] = None) -> Optional[Dict]:
+        """
+        Gate 2: Signal Classification — v15.1
+
+        ลำดับ: เฉพาะสุด → กว้างสุด
+          1. ABSORPTION (DER ≥ 0.6 + flat — ไม่ overlap กับอื่น)
+          2. REVERSAL (M5 OB/OS — ต้องเช็คก่อน MOMENTUM)
+          3. MEAN_REVERT (H1 dist + wall — ต้องเช็คก่อน MOMENTUM)
+          4. MOMENTUM (catch-all DER ≥ 0.3)
+          5. FAIL
+        """
+        if len(candles_m5) < 4:
+            return None
+
+        # Calculate ATR and current price
+        atr = self._calc_atr(candles_m5, 14)
+        current_close = float(candles_m5.iloc[-1]['close'])
+
+        # Effective ATR Clamping
+        effective_atr = max(atr, current_close * 0.0005)
+        self.atr_m5 = effective_atr
+
+        # === Delta Calculation ===
+        recent = candles_m5.iloc[-5:]
+        deltas = []
+        for _, row in recent.iterrows():
+            if row['close'] > row['open']:
+                delta = row['volume']
+            elif row['close'] < row['open']:
+                delta = -row['volume']
+            else:
+                delta = 0
+            deltas.append(delta)
+
+        cumulative_delta = sum(deltas)
+        total_volume = sum(abs(d) for d in deltas)
+        avg_vol = candles_m5['volume'].iloc[-20:].mean()
+
+        # DER = |cumulative_delta| / total_volume
+        der = abs(cumulative_delta) / total_volume if total_volume > 0 else 0.0
+        self._current_der = der
+        raw_direction = 'LONG' if cumulative_delta > 0 else 'SHORT'
+
+        # H1 distance + bias
+        h1_dist = binance_data.get('h1_ema_dist_pct', 0)
+        h1_bias = binance_data.get('h1_bias', 'NEUTRAL')
+
+        # EMA M5 distance (สำหรับ OB/OS detection)
+        ema20_m5 = candles_m5['close'].ewm(span=20).mean().iloc[-1]
+        ema_distance = (current_close - ema20_m5) / effective_atr
+        volatility_factor = effective_atr / (current_close * 0.001)
+        max_ema_dist = 1.0 * max(0.8, min(volatility_factor, 1.5))
+
+        m5_overbought = ema_distance > max_ema_dist
+        m5_oversold = ema_distance < -max_ema_dist
+
+        # Price movement (ATR units)
+        price_move = abs(recent.iloc[-1]['close'] - recent.iloc[0]['open'])
+        price_move_atr = price_move / effective_atr
+
+        # ==============================================
+        # 1. ABSORPTION (เฉพาะสุด — เช็คก่อน)
+        #    DER ≥ 0.6 + price flat < 0.5 ATR
+        # ==============================================
+        if der >= self.der_strong and price_move_atr < 0.5:
+            direction = 'SHORT' if cumulative_delta > 0 else 'LONG'
+            signal_type = 'ABSORPTION'
+            self.logger.info(
+                f"{self.log_prefix} Gate 2b: ABSORPTION | DER:{der:.3f} "
+                f"price_move:{price_move_atr:.1f}ATR → {direction}"

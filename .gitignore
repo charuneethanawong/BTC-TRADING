@@ -1,0 +1,49 @@
+# Environment & Secrets
+**/.env
+*.env
+.env.*
+!.env.template
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+*.log.*
+
+# Node
+node_modules/
+frontend/dist/
+
+# MT5
+*.ex5
+
+# Data (keep structure, ignore contents)
+btc_sf_bot/data/*.jsonl
+btc_sf_bot/src/data/*.jsonl
+btc_sf_bot/src/logs/
+
+nul
+**/nul

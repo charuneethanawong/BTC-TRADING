@@ -1,0 +1,5 @@
+/* v26.0: Reset — no Vite defaults */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}

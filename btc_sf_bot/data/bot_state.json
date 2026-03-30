@@ -1,0 +1,14 @@
+{
+    "trend": "BULLISH",
+    "structure_quality": 8,
+    "last_confirmed_high": 98000.0,
+    "last_confirmed_low": Infinity,
+    "last_bos_time": "2026-03-30T00:18:29.640786+00:00",
+    "last_bos_score": 8,
+    "last_bos_status": "CONFIRMED",
+    "looking_for": "ENTRY_SETUP",
+    "can_look_for_entry": true,
+    "entry_direction": "LONG",
+    "has_pending_bos": false,
+    "pending_bos_age": null
+}

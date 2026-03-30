@@ -1,0 +1,7 @@
+{
+    "title": "[AUDIT] Fix Data Parity and Missing Market Snapshots",
+    "description": "The Audit Agent has identified critical issues in main.py and ai_analyzer.py. See bug.md for details.\n\n1. Stale market context in AI trade log (main.py: _send_signal uses dashboard_state instead of current cycle data).\n2. Missing Phase 1.5 Market Snapshots implementation.\n3. Missing log_market_snapshot and evaluate_snapshots methods in ai_analyzer.py.",
+    "priority": "high",
+    "assigneeAgentId": "53e4d198-4bc2-4320-9a9b-614578fe19b0",
+    "parentId": "64d29079-0d93-4edb-897c-b5a5a4411968"
+}

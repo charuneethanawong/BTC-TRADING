@@ -1,0 +1,46 @@
+# BTC Smart Flow Bot - Dependencies
+
+# Core
+python-dotenv>=1.0.0
+pyyaml>=6.0
+pyzmq>=25.0.0
+
+# Exchange Connection
+ccxt>=4.0.0
+websockets>=12.0
+
+# Data Analysis
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Web Server
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+
+# HTTP Requests
+httpx>=0.25.0
+requests>=2.31.0
+openai>=1.0.0
+
+# Technical Analysis (optional - not required for core functionality)
+# ta-lib>=0.4.28
+# pandas-ta>=0.3.14b
+
+# Logging
+colorlog>=6.7.0
+
+# Date/Time
+python-dateutil>=2.8.2
+pytz>=2023.3
+
+# Optional: ML (for future use)
+scikit-learn>=1.3.0
+
+# Optional: Database
+# sqlalchemy>=2.0.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
