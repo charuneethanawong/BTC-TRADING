@@ -1,24 +1,36 @@
-# Architecture Plan — v79.0 — IPA EQS Optimization
+# Architecture Plan — v80.0 — Volume Profile Sideway Liberation
 **Status:** 🔲 PENDING
 **Date:** 2026-04-10
 **Lead Architect:** Arch
 
 ---
 
-## 1. IPA: EQS (Entry Quality Score) Relaxation (MOD-100)
+## 1. VP_POC: Gate-Based Migration & Sideway Liberation (MOD-101)
 
 **Objective:**
-ปัจจุบัน IPA (v60.0) มีระบบ Gate ที่เข้มงวดมาก (EQS_TOTAL > 0) ทำให้บอทปฏิเสธการเทรดในจังหวะที่ "เบรกแรงแต่ย่อลึก" หรือ "เบรกแล้วไปต่อโดยยังไม่ย่อสมบูรณ์" ทั้งที่มีแรงเงินสถาบัน (DER) หนุนชัดเจน
+ปัจจุบัน VP_POC มีลอจิกบล็อกสัญญาณในสภาวะ SIDEWAY ซึ่งขัดต่อหลักการของ Volume Profile ที่ควรจะเทรดได้ดีที่สุดในกรอบสะสมพลัง เราจะทำการปลดล็อกนี้และเปลี่ยนระบบเป็น Gate-based เพื่อความเด็ดขาด
 
-### 1.1 ปรับเกณฑ์ด่านตรวจคุณภาพ (Relax EQS Gate)
-*   **เดิม:** บล็อกทันทีถ้า EQS_TOTAL <= 0
-*   **ใหม่:** อนุญาตให้ผ่านได้ถ้า EQS_TOTAL == 0 **หากมี** der > 0.35 (High Flow Bypass)
-*   *เหตุผล:* ในสภาวะที่สถาบันอัดเงินจริง (High DER) กราฟอาจจะมีความผันผวนสูงจนทำให้คะแนน EQS ต่ำ (เช่น ย่อลึกเกินไปหรือวอลุ่มพีคเกินไป) แต่การมี DER สูงยืนยันว่าการเบรกนั้น "ของจริง"
+### 1.1 ปลดบล็อก SIDEWAY (Unblock Sideway)
+*   **Action:** ลบเงื่อนไขที่บล็อก m5_state หากไม่ใช่ Trending/Accumulation/Expansion ทิ้งทั้งหมด
+*   **เป้าหมาย:** อนุญาตให้ VP_POC และ VP_BOUNCE ทำงานได้ในทุกสภาวะตลาด (ยกเว้น EXHAUSTION ที่มีความเสี่ยงสูง)
+
+### 1.2 ระบบ Gate-Based (VP_POC v80.0)
+*   **Gate 1 (Reaction):** ต้องเป็น FALSE_BO, REJECT, หรือ BREAK (เน้น FALSE_BO และ REJECT ในไซด์เวย์)
+*   **Gate 2 (Flow):** der > 0.15 (ลดเกณฑ์เพื่อให้เข้าเทรดในไซด์เวย์ได้ง่ายขึ้น)
+*   **Gate 3 (Proximity):** ราคาต้องอยู่ใกล้ POC ในระยะ < 1.0 ATR
+*   **Gate 4 (Safety):** บล็อกเฉพาะ EXHAUSTION เท่านั้น
 
 ---
 
-## 2. ขั้นตอนการทำงาน (Execution Steps)
+## 2. VP_BOUNCE: Verification & State Audit
+*   ตรวจสอบเพื่อให้มั่นใจว่าไม่มีลอจิกซ่อนเร้นที่บล็อกสถานะ SIDEWAY หรือ RANGING
+*   ยืนยันการใช้ Gate-based ที่รองรับการเทรดในกรอบ
 
-1.  [ ] **Dev:** แก้ไข tc_sf_bot/src/detectors/ipa.py (v79.1) เพื่อปรับจูนลอจิก EQS Gate
-2.  [ ] **Auditor:** ตรวจสอบความปลอดภัยว่าการลดเกณฑ์ไม่ทำให้ Win Rate ตกฮวบในตลาดไซด์เวย์
-3.  [ ] **Test:** รันเทสต์เพื่อยืนยันว่าบอท "ออกของ" (IPA) ได้ในจังหวะที่เคยถูกบล็อก
+---
+
+## 3. ขั้นตอนการทำงาน (Execution Steps)
+
+1.  [ ] **Dev:** Refactor p_poc.py (Remove Score -> Implement Gates, Remove Sideway Block)
+2.  [ ] **Dev:** Audit p_bounce.py เพื่อลบ State Block ที่ไม่จำเป็นออก (ถ้ามี)
+3.  [ ] **Auditor:** ตรวจสอบความถูกต้องของการตัดสินใจทิศทางในจังหวะสะบัด (Manipulation)
+4.  [ ] **Test:** ตรวจสอบว่าบอทยิงสัญญาณในกรอบ SIDEWAY ได้จริง
