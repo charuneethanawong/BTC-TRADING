@@ -1,5 +1,5 @@
 """
-Momentum Detector — v72.0 MOD-91 (Two-Lane System)
+Momentum Detector — v78.0 MOD-99 (Two-Lane System)
 
 Dual-Path Momentum (Sniper & Rocket):
 - MOD-62: Dual-Path Logic (Path A: Sniper <40pts, Path B: Rocket >40pts with Wall>50x/OI>0.1%/DER>0.8)
@@ -91,7 +91,7 @@ class MomentumDetector(BaseDetector):
         # Check Force Alignment
         der_aligned = (direction_bias == der_direction)
         imb_aligned = (direction_bias == 'LONG' and imbalance > 1.10) or (direction_bias == 'SHORT' and imbalance < 0.90)  # v74.0: Relaxed
-        is_perfect_alignment = der_aligned and imb_aligned and (direction_bias != 'NEUTRAL')
+        is_perfect_alignment = (der_aligned and (imb_aligned or der > 0.5)) and (direction_bias != 'NEUTRAL')
         
         # direction_raw for fast-trigger mode (defined early for later use)
         direction_raw = 'LONG' if delta > 0 else 'SHORT'
@@ -100,7 +100,7 @@ class MomentumDetector(BaseDetector):
         rocket_by_wall = (wall_ratio > 30 and der > 0.7)
         rocket_by_force = (der > 0.80 and volume_ratio > 1.5)
         
-        # === v72.0 MOD-91: Two-Lane Momentum System ===
+        # === v78.0 MOD-99: Two-Lane Momentum System ===
         # Lane A: Institutional Standard (requires PERFECT ALIGNMENT)
         # Lane B: Pure Force Rocket (bypasses Bias, requires EXTREME FORCE)
         
@@ -123,7 +123,7 @@ class MomentumDetector(BaseDetector):
         elif lane_a_qualified: active_lane = 'LANE_A'
         
         rocket_requirements_met = (
-            m5_dist_pts > 50 and
+            m5_dist_pts > 75 and
             (rocket_by_wall or rocket_by_force or is_extreme_force)  # Include Lane B extreme force
         )
 
@@ -164,7 +164,7 @@ class MomentumDetector(BaseDetector):
         # Otherwise, use m5_bias direction
         # Note: direction_raw already defined at line 95 for Perfect Alignment check
         
-        # v72.0 MOD-91: Lane B (Pure Force Rocket) uses DER direction instead of Bias
+        # v78.0 MOD-99: Lane B (Pure Force Rocket) uses DER direction instead of Bias
         if use_lane_b:
             # Lane B bypasses Bias - uses pure force direction (DER)
             direction = direction_raw
@@ -187,7 +187,7 @@ class MomentumDetector(BaseDetector):
 
         # v65.2 MOD-70: Path A (Sniper) - M5 Dist > 50 pts blocks normal entry
         # Path B (Rocket) bypasses this if rocket_requirements_met
-        if m5_dist_pts > 50 and not rocket_requirements_met:
+        if m5_dist_pts > 75 and not rocket_requirements_met:
             blocks.append(f'M5_DIST>{int(m5_dist_pts)}pts_noRocket')
 
         # TOO_EARLY state (early in trend) — MOD-57: Allow if Wall Ratio > 20x or OI Change > 0.1%
@@ -212,7 +212,7 @@ class MomentumDetector(BaseDetector):
         
         # === v69.0 MOD-81: Force Alignment Guard ===
         # 1. Strict Flow Alignment: Block if Bias (direction) conflicts with DER direction
-        # v72.0 MOD-91: Lane B (Pure Force Rocket) bypasses this - uses DER direction directly
+        # v78.0 MOD-99: Lane B (Pure Force Rocket) bypasses this - uses DER direction directly
         if direction == 'LONG' and der_direction == 'SHORT' and not use_lane_b:
             blocks.append('FORCE_MISMATCH_LONG+DER_SHORT')
         elif direction == 'SHORT' and der_direction == 'LONG' and not use_lane_b:
@@ -221,9 +221,9 @@ class MomentumDetector(BaseDetector):
         # 2. Imbalance Aggression Requirement - Bypass for Rocket Mode and Lane B
         # v71.0 MOD-89: Tightened to 1.2/0.8 (was 1.1/0.9)
         # v72.0: Lane B (Extreme Force) bypasses imbalance requirement
-        if direction == 'LONG' and imbalance <= 1.10 and not (rocket_requirements_met or use_lane_b):  # v74.0: Relaxed
+        if direction == 'LONG' and imbalance <= 1.08 and not (rocket_requirements_met or use_lane_b):  # v74.0: Relaxed
             blocks.append(f'IMBALANCE_LOW_LONG({imbalance:.2f})')
-        elif direction == 'SHORT' and imbalance >= 0.90 and not (rocket_requirements_met or use_lane_b):  # v74.0: Relaxed
+        elif direction == 'SHORT' and imbalance >= 0.92 and not (rocket_requirements_met or use_lane_b):  # v74.0: Relaxed
             blocks.append(f'IMBALANCE_HIGH_SHORT({imbalance:.2f})')
         
         # 3. Fading State Block - Bypass for Rocket Mode and Lane B (high conviction)
@@ -288,7 +288,7 @@ class MomentumDetector(BaseDetector):
             'fast_trigger': 1 if fast_trigger_enabled else 0,
             'velocity_trigger': 1 if velocity_trigger else 0,
             'rocket_mode': 1 if rocket_requirements_met else 0,
-            # v72.0 MOD-91: Lane identification
+            # v78.0 MOD-99: Lane identification
             'lane_a_qualified': 1 if lane_a_qualified else 0,
             'lane_b_qualified': 1 if lane_b_qualified else 0,
             'use_lane_b': 1 if use_lane_b else 0,
