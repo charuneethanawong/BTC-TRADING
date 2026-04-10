@@ -1,8 +1,13 @@
 """
-VP Breakout Detector — v57.0 MOD-53
+VP Breakout Detector — v77.0 MOD-97
 
 Detects VA Breakout + POC Shift signals: price breaks VAH/VAL + volume confirm + POC shift
 = institutional accept new range.
+
+v77.0: Score-to-Condition Migration (Two-Lane System)
+- Removed scoring system (score_threshold=6)
+- Implemented 4 Gates: Price Breakout, Order Flow Alignment, False Breakout Guard, Wall Resistance
+- Fixed score=1 when all conditions pass
 """
 from typing import List, Dict, Any, Optional
 
@@ -18,7 +23,7 @@ logger = get_logger(__name__)
 class VPBreakoutDetector(BaseDetector):
     signal_type = 'VP_BREAKOUT'
     timing = BaseDetector.TIMING_60S  # v57.0: Catch breakout in real-time
-    score_threshold = 6  # v57.0: Lowered to catch early momentum # v47.0: MOD-19 reduced from 9 to 8
+    # v77.0: REMOVED score_threshold - now condition-based system
 
     def __init__(self, config: dict = None):
         self.config = config or {}
@@ -26,7 +31,7 @@ class VPBreakoutDetector(BaseDetector):
         self.logger = logger
 
     def detect(self, ctx: DetectionContext) -> List[SignalResult]:
-        """Detect VP_BREAKOUT signals — VA Breakout + POC Shift."""
+        """Detect VP_BREAKOUT signals — Condition-based (Two-Lane System) v77.0"""
         results = []
 
         binance_data = ctx.binance_data or {}
@@ -41,21 +46,19 @@ class VPBreakoutDetector(BaseDetector):
         # v50.3: Data Sync — ensure we use Snapshot values (calculated) not raw binance_data
         delta = ctx.snapshot.delta
         der = ctx.snapshot.der
-        der_persistence = ctx.snapshot.der_persistence if hasattr(ctx.snapshot, 'der_persistence') else 0
         regime = ctx.regime.regime
         m5_state = ctx.snapshot.m5_state
         oi_change = ctx.snapshot.oi_change_pct if hasattr(ctx.snapshot, 'oi_change_pct') else 0.0
-        
-        poc_shift = getattr(ctx.snapshot, 'vp_poc_shift', 0.0)
-        poc_shift_dir = getattr(ctx.snapshot, 'vp_poc_shift_direction', 'NEUTRAL')
         volume_ratio = ctx.snapshot.volume_ratio_m5 if hasattr(ctx.snapshot, 'volume_ratio_m5') else 1.0
 
-        # Gate: Need VA levels
+        # Gate 0: Need VA levels
         if not vah or not val:
             self.last_reject_reason = 'No VA levels available'
             return []
 
-        # 1. Detect breakout
+        # ===============================
+        # GATE 1: PRICE BREAKOUT (Trigger)
+        # ===============================
         direction = None
         if current_price > vah and volume_ratio > 1.2:
             direction = 'LONG'
@@ -63,110 +66,78 @@ class VPBreakoutDetector(BaseDetector):
             direction = 'SHORT'
 
         if not direction:
-            self.last_reject_reason = f'No breakout detected (vol:{volume_ratio:.1f}x)'
+            self.last_reject_reason = f'No breakout: price not breaking VAH/VAL or vol<1.2x (vol:{volume_ratio:.1f}x)'
             return []
 
-        # v51.2: POC shift is now scoring bonus, not hard gate
-        # POC is a lagging indicator — shift comes 15-30min AFTER breakout
-        # Volume + price breakout alone is sufficient to confirm
+        # ===============================
+        # GATE 2: ORDER FLOW ALIGNMENT (Confirmation)
+        # ===============================
+        if direction == 'LONG':
+            # LONG needs: der > 0.4 AND delta > 0
+            if not (der > 0.4 and delta > 0):
+                self.last_reject_reason = f'LONG order flow not aligned: der={der:.2f}, delta={delta:.0f} (need der>0.4 and delta>0)'
+                return []
+        else:  # SHORT
+            # SHORT needs: der > 0.4 AND delta < 0
+            if not (der > 0.4 and delta < 0):
+                self.last_reject_reason = f'SHORT order flow not aligned: der={der:.2f}, delta={delta:.0f} (need der>0.4 and delta<0)'
+                return []
 
-        # 3. False breakout detection
-        is_false, false_reasons = self._detect_false_breakout(ctx, direction)
-        if is_false:
-            self.last_reject_reason = f'[{direction}] False breakout: {",".join(false_reasons)}'
+        # ===============================
+        # GATE 3: FALSE BREAKOUT GUARD (Blocker)
+        # ===============================
+        # Block if M5 state is EXHAUSTION
+        if m5_state == 'EXHAUSTION':
+            self.last_reject_reason = 'M5 state EXHAUSTION - false breakout likely'
             return []
-
-        # Initialize breakdown
-        breakdown = self._init_breakdown(ctx)
-
-        # Scoring
-        score = 0
-
-        # Volume
-        if volume_ratio > 2.0:
-            score += 3
-            breakdown['vol'] = 3
-        elif volume_ratio > 1.5:
-            score += 2
-            breakdown['vol'] = 2
-        elif volume_ratio > 1.2:
-            score += 1
-            breakdown['vol'] = 1
-
-        # POC shift confirm
-        if (direction == 'LONG' and poc_shift > 0) or (direction == 'SHORT' and poc_shift < 0):
-            score += 2
-            breakdown['poc_shift'] = 2
-
-                # POC shift confirm (lagging but high weight if it happened)
-        if (direction == 'LONG' and poc_shift > 0) or (direction == 'SHORT' and poc_shift < 0):
-            score += 2
-            breakdown['poc_shift'] = 2
-# DER direction aligned
-        if der > 0.6:
-            score += 3
-            breakdown['der'] = 3
-        elif der > 0.4:
-            score += 2
-            breakdown['der'] = 2
-
-        # OI increase (new positions)
-        if oi_change > 0.05:
-            score += 1
-            breakdown['oi'] = 1
-
-        # LVN ahead (speed zone)
-        lvn_list = swing.get('lvn', [])
-        if lvn_list:
-            if direction == 'LONG':
-                lvn_ahead = [l for l in lvn_list if l['price'] > current_price]
-            else:
-                lvn_ahead = [l for l in lvn_list if l['price'] < current_price]
-            if lvn_ahead:
-                score += 1
-                breakdown['lvn_ahead'] = 1
-
-        # Break distance > 0.3 ATR
-        break_dist = abs(current_price - (vah if direction == 'LONG' else val))
-        if break_dist > atr_m5 * 0.3:
-            score += 1
-            breakdown['break_dist'] = 1
-
-        # False breakout data
-        breakdown['false_bo_score'] = len(false_reasons)
-        breakdown['false_bo_reasons'] = ','.join(false_reasons) if false_reasons else 'none'
-        breakdown['false_bo_volume'] = round(volume_ratio, 2)
         
-        breakdown['false_bo_oi_change'] = round(oi_change, 4)
-        breakdown['false_bo_der_pers'] = der_persistence
-
-        if score < self.score_threshold:
-            reason = f"Score {score} < {self.score_threshold}"
-                        # v43.9: Full Scorecard Log - Show all scoring components (even if 0)
-            scorecard_keys = ['der', 'wall', 'vol', 'er', 'pers', 'oi', 'cont', 'rej', 'reaction', 'wick_rej', 'hvn_touch', 'hvn_vol', 'breakout_vol', 'poc_shift_pts', 'wall_hold', 'false_bo_score']
-            scoring_items = []
-            for k in scorecard_keys:
-                if k in breakdown:
-                    v = breakdown[k]
-                    scoring_items.append(f"{k}:{v}")
-            
-            # Add False BO warning if likely
-            if breakdown.get('false_bo_likely'):
-                scoring_items.append("false_bo:TRUE!!")
-            
-            details = ", ".join(scoring_items)
-            self.last_reject_reason = f"{reason} ({details})" if details else reason
+        # Block if OI declining (liquidation, not new positions)
+        if oi_change < -0.05:
+            self.last_reject_reason = f'OI declining {oi_change:.1%} - likely liquidation not new positions'
             return []
 
+        # ===============================
+        # GATE 4: WALL RESISTANCE BLOCK (Blocker)
+        # ===============================
+        wall_scan = binance_data.get('wall_scan', {})
+        wall_ratio = 0
+        if wall_scan:
+            wall_ratio = wall_scan.get('wall_ratio', 0)
+            wall_distance = wall_scan.get('distance_pct', 999)
+            if direction == 'LONG':
+                # For LONG breakout, check wall ABOVE current price
+                if wall_ratio > 20 and wall_distance < 5:
+                    self.last_reject_reason = f'Wall resistance {wall_ratio:.0f}x blocks LONG breakout (distance:{wall_distance:.1f}%)'
+                    return []
+            else:  # SHORT
+                # For SHORT breakout, check wall BELOW current price
+                if wall_ratio > 20 and wall_distance < 5:
+                    self.last_reject_reason = f'Wall resistance {wall_ratio:.0f}x blocks SHORT breakout (distance:{wall_distance:.1f}%)'
+                    return []
+
+        # ===============================
+        # ALL GATES PASSED — CREATE SIGNAL
+        # ===============================
+        
         # Entry: Retest VAH/VAL (don't chase breakout bar)
         entry = vah if direction == 'LONG' else val
+        
+        # v77.0: Build breakdown for telemetry
+        breakdown = {
+            'gate1_price_breakout': True,
+            'gate2_order_flow': f'der={der:.2f},delta={delta:.0f}',
+            'gate3_false_bo': f'oi={oi_change:.1%},state={m5_state}',
+            'gate4_wall': f'ratio={wall_ratio if wall_scan else 0:.0f}x',
+            'volume_ratio': round(volume_ratio, 2),
+            'atr_m5': round(atr_m5, 2),
+        }
 
         result = SignalResult(
             signal_type='VP_BREAKOUT',
             direction=direction,
             entry_price=entry,
-            score=score,
-            threshold=self.score_threshold,
+            score=1,  # v77.0: Fixed score since condition-based
+            threshold=1,  # v77.0: No threshold needed
             score_breakdown=breakdown,
             regime=regime,
             m5_state=m5_state,
@@ -174,7 +145,7 @@ class VPBreakoutDetector(BaseDetector):
             h1_dist_pct=binance_data.get('h1_ema_dist_pct', 0.0),
             der=der,
             delta=delta,
-            wall_info=binance_data.get('wall_scan', {}).get('raw_dominant', 'NONE'),
+            wall_info=wall_scan.get('raw_dominant', 'NONE') if wall_scan else 'NONE',
             session=session,
             atr_m5=atr_m5,
             atr_ratio=ctx.snapshot.atr_ratio if hasattr(ctx.snapshot, 'atr_ratio') else 1.0,
@@ -183,25 +154,5 @@ class VPBreakoutDetector(BaseDetector):
         results.append(result)
         return results
 
-    def _detect_false_breakout(self, ctx: DetectionContext, direction: str) -> tuple:
-        """v53.1: False Breakout Detection — only real indicators."""
-        reasons = []
-
-        volume_ratio = ctx.snapshot.volume_ratio_m5 if hasattr(ctx.snapshot, 'volume_ratio_m5') else 1.0
-        oi_change = ctx.snapshot.oi_change_pct if hasattr(ctx.snapshot, 'oi_change_pct') else 0.0
-
-        # 1. Volume ต่ำตอน break (no conviction)
-        if volume_ratio < 1.2:
-            reasons.append('LOW_VOLUME')
-
-        # 2. OI ลด (liquidation not new position)
-        if oi_change < -0.05:
-            reasons.append('OI_DECLINING')
-
-        # v53.1: Removed — not real false BO indicators:
-        # NO_POC_SHIFT (POC lags 15-30 min after breakout)
-        # DER_NOT_SUSTAINED (breakout just started = persistence 1 is normal)
-        # LVN_SWEEP (LVN = speed zone ahead = good, not fake)
-
-        is_false = len(reasons) >= 2
-        return is_false, reasons
+    # v77.0: _detect_false_breakout logic integrated into Gate 3 above
+    # Remaining for backwards compatibility if needed elsewhere

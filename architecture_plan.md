@@ -1,58 +1,39 @@
-# Architecture Plan — v75.0 — Symmetric Trend Support Sniper
+# Architecture Plan — v77.0 — Dual-Detector Condition-Based Migration
 **Status:** 🔲 PENDING
-**Date:** 2026-04-07
+**Date:** 2026-04-10
 **Lead Architect:** Arch
 
 ---
 
-## 1. REVERSAL: Trend Support Sniper Lane (MOD-96)
+## 1. VP_BREAKOUT: Score-to-Condition Migration (MOD-97)
 
-**Objective:** ปลดล็อกจุดเข้า "ย่อซื้อ/เด้งขาย" (Buy the Dip / Sell the Rally) ที่บริเวณเส้นค่าเฉลี่ย H1 ซึ่งเป็นจุดที่ได้เปรียบที่สุด แต่ปัจจุบันถูกบล็อกด้วยกฎ H1 Distance > 0.5%
+**Objective:**
+เปลี่ยนจากระบบสะสมแต้ม (Score-based) ที่ทำให้ "ตกรถ" เพราะแต้ม Lagging เป็นระบบ **Gate-based (Two-Lane)** เพื่อการตัดสินใจที่เฉียบขาดและทันที (Zero-Lag)
 
-### **Actions: Lane C - Trend Support (Symmetric)**
-อนุญาตให้เทรด Reversal ได้แม้ **H1 Dist < 0.5%** หากเข้าเงื่อนไข **"3 ประสานแห่งการพักตัว"** ครบทุกข้อ:
-
-1.  **Trend Alignment (ทิศทางหลัก):**
-    *   **LONG:** H1 Bias == BULLISH
-    *   **SHORT:** H1 Bias == BEARISH
-2.  **M5 Deep Stretch (แรงย่อถึงจุดพีค):**
-    *   **LONG:** ราคาต้องอยู่ใต้เส้น M5 EMA20 > 70 pts
-    *   **SHORT:** ราคาต้องอยู่เหนือเส้น M5 EMA20 > 70 pts
-3.  **Institutional Hard Confirmation (สถาบันยืนยัน):**
-    *   **Wall Ratio:** ต้องหนา **> 5.0x** (ป้องกันการไหลทะลุเส้นแนวรับ/ต้านใหญ่)
-    *   **DER Force:** ต้องอ่อนแรงสุดขีด **< 0.15** (ยืนยันว่า Pullback จบแล้ว ไม่ใช่เทรนด์เปลี่ยนทิศ)
-    *   **OI Change:** ต้องเป็นบวก **> 0.0%** (มีเงินใหม่เข้ามาช่วยยันที่เส้น)
+### 1.1 เงื่อนไขบังคับ (Gates)
+*   **Gate 1 (Trigger):** ราคาเบรก VAH/VAL และ olume_ratio > 1.2
+*   **Gate 2 (Confirmation):** der > 0.4 และ delta สอดคล้องกับทิศทางเบรก
+*   **Gate 3 (Blocker):** บล็อกถ้า oi_change < -0.05 (Liquidation) หรือ m5_state == EXHAUSTION
+*   **Gate 4 (Wall):** บล็อกถ้ามีกำแพงหนา (> 20x) ขวางหน้าในระยะใกล้
 
 ---
 
-## 2. REVERSAL: Triple-Lane Decision Matrix
+## 2. VP_BOUNCE: Score-to-Condition Migration (MOD-98)
 
-ปรับโครงสร้าง Reversal เป็น 3 เลนเพื่อให้ครอบคลุมทุกโอกาส:
-- **Lane A (Standard):** H1 Dist > 0.5% + Wall > 1.4x + Exhaustion (<0.15)
-- **Lane B (V-Shape):** H1 Dist > 0.5% + Wall > 5.0x + V-Shape (>0.35)
-- **Lane C (Trend Sniper):** H1 Dist < 0.5% + Wall > 5.0x + Exhaustion (<0.15) + **Trend Support**
+**Objective:**
+อัปเกรด VP_BOUNCE ให้มีความเด็ดขาดและแม่นยำขึ้น โดยใช้ระบบ Gate-based แทนการสะสมแต้มแบบเดิม เพื่อป้องกันความสับสนและลดโอกาสพลาดสัญญาณเด้งที่มีคุณภาพ (Quality Bounce)
 
----
-
-## 3. Implementation History (Consolidated)
-
-| MOD | Description | Status |
-|-----|-------------|--------|
-| 1-92 | Momentum & Global Fixes | ✅ FIXED |
-| 93-94 | Reversal Dual-Confirmation & Buffer | ✅ FIXED |
-| 95 | Momentum Sensitivity Tuning (v74.0) | ✅ FIXED |
-| 96 | Reversal Lane C: Trend Support Sniper | 🔲 PENDING |
+### 2.1 เงื่อนไขบังคับ (Gates)
+*   **Gate 1 (Precise Reaction):** ต้องเป็น FALSE_BO หรือ REJECT เท่านั้น (บล็อก BREAK ทุกกรณี)
+*   **Gate 2 (Flow Alignment):** der > 0.15 และทิศทางต้องสอดคล้องกับการเด้ง (Confirm เงินไหลเข้าช่วยดัน)
+*   **Gate 3 (Distance Guard):** ระยะห่างจากระดับนัยสำคัญ (HVN/VAH/VAL) ต้อง < 1.0 ATR (เพื่อ SL ที่แคบและคุ้มค่า)
+*   **Gate 4 (Blocker):** บล็อกถ้า m5_state == EXHAUSTION (เสี่ยงโดนลากทะลุ)
 
 ---
 
-## System Reference (v75.0 Target)
-`
-REVERSAL:     3-Lane System (Standard | V-Shape | Trend Support)
-MOMENTUM:     2-Lane System (Perfect Alignment | Pure Force Rocket)
-IPA:          Adaptive Tension Sniper (H1 Dist > 0.5% for Late Bias)
-ABSORPTION:   Flexible Wall (30x or 15x+ER>0.4) + ATR_R < 1.2
-`
+## 3. ขั้นตอนการทำงาน (Execution Steps)
 
----
-
-*Architecture Plan v75.0 — Buying the dip with institutional precision.*
+1.  [ ] **Dev:** Refactor p_breakout.py (Remove Score -> Implement Gates)
+2.  [ ] **Dev:** Refactor p_bounce.py (Remove Score -> Implement Gates)
+3.  [ ] **Auditor:** ตรวจทานความปลอดภัยของ Gates และการตั้ง score_threshold = 1
+4.  [ ] **Test:** ตรวจสอบว่าระบบส่งสัญญาณได้ตามเป้าหมายและไม่ติดคอขวดคะแนนอีกต่อไป
