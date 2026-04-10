@@ -38,13 +38,15 @@ class AIMarketAnalyzer:
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
         
-        # v26.1: Absolute path for log files (Fix 1C)
-        self._log_path = Path(__file__).resolve().parent.parent.parent / 'data' / 'ai_trade_log.jsonl'
-        self._ai_analysis_log_path = Path(__file__).resolve().parent.parent.parent / 'data' / 'ai_analysis_log.jsonl'
-        self._ai_market_results_path = Path(__file__).resolve().parent.parent.parent / 'data' / 'ai_market_results.jsonl'
-        self._ai_accuracy_log_path = Path(__file__).resolve().parent.parent.parent / 'data' / 'ai_accuracy_log.jsonl'
-        self._ai_skipped_log_path = Path(__file__).resolve().parent.parent.parent / 'data' / 'ai_skipped_log.jsonl'
-        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        # v36.0: Use SQLite DB instead of JSONL
+        from src.data.db_manager import get_db
+        self._db = get_db()
+        
+        # v36.2: Removed legacy JSONL paths - use DB only
+        # Legacy paths removed - all logging now goes to SQLite
+        
+        # v36.2: Enable auto-flush for DB writes
+        self._db_auto_flush = True
         
         # ปิด log รกๆ ของ httpx เวลายิง API ออกไป
         import logging
@@ -52,15 +54,18 @@ class AIMarketAnalyzer:
         
         self.api_key = self.config.get('openrouter_api_key', '')
         # v18.7: OpenRouter — ใช้ DeepSeek Chat (free tier)
-        self.model = self.config.get('ai_model', 'deepseek/deepseek-chat')
+        self.model = self.config.get('ai_model', 'deepseek/deepseek-v3.2')
         
-        # Enable only if API key provided
-        self.enabled = bool(self.api_key) and OPENAI_AVAILABLE
+        # Enable only if API key provided (Disabled per user request)
+        self.enabled = False # bool(self.api_key) and OPENAI_AVAILABLE
         
         # Rate limiting
         self.call_interval = self.config.get('call_interval', 300)  # 5 นาที
         self._last_call_time = None
         self._cached_result = None
+        
+        # v35.2: Cache for close context
+        self._last_binance_data = {}
         
         # v18.5: Accuracy tracking
         self._ai_history: List[Dict] = []  # เก็บ AI analysis + price ทุกครั้ง
@@ -130,8 +135,14 @@ class AIMarketAnalyzer:
         # v27.1: Order flow from MarketSnapshot (via binance_data propagation)
         of = binance_data.get('order_flow_summary', {}) or {}
         der_val = of.get('der', 0)
-        ws = binance_data.get('wall_scan', {}) or {}
-        wall = f"{ws.get('raw_dominant', 'N')} {ws.get('raw_ratio', 1):.1f}x"
+        # v34.6: Use wall_info string (same as gate uses), fallback to wall_dom/wall_ratio
+        wall_info = binance_data.get('wall_info', '')
+        if not wall_info or wall_info == 'NONE':
+            wall_dom = binance_data.get('wall_dom', 'N')
+            wall_ratio = binance_data.get('wall_ratio', 1.0)
+            wall = f"{wall_dom} {wall_ratio:.1f}x"
+        else:
+            wall = wall_info
 
         # v27.3: Raw pullback data — let AI assess significance
         pb = binance_data.get('pullback', {}) or {}
@@ -232,37 +243,74 @@ class AIMarketAnalyzer:
         oi_chg_pct = ((oi - oi_prev) / oi_prev * 100) if oi_prev > 0 else 0
         extra_data_str = f"\npoc:{poc:.0f} funding:{funding:.6f} oi_chg:{oi_chg_pct:+.2f}%" if poc > 0 else ""
 
-        # v28.1: M5 EMA position + range + candle pattern
+        # v37.3: Add 7 missing fields for AI context
+        # Session
+        session = binance_data.get('session', 'LONDON')
+        
+        # M5 EMA position
         m5_ema_pos = ''
+        if snap and hasattr(snap, 'm5_ema_position'):
+            m5_ema_pos = f" ema_pos:{snap.m5_ema_position}"
+        
+        # DER direction (flow_dir)
+        der_dir = of.get('der_direction', 'NEUTRAL')
+        
+        # Regime confidence
+        regime_conf = 'HIGH'
+        if regime_obj and hasattr(regime_obj, 'regime_confidence'):
+            regime_conf = regime_obj.regime_confidence
+        
+        # ATR
+        atr = 0
+        if regime_obj and hasattr(regime_obj, 'atr_m5'):
+            atr = regime_obj.atr_m5
+        
+        # v37.3: VAH/VAL
+        vah = binance_data.get('vah', 0)
+        val = binance_data.get('val', 0)
+        
+        # v28.1: M5 EMA position + range + candle pattern
         m5_range_str = ''
         
 
-        return f"""price:{current_price:.0f} {ema_summary}{bias_lvl_str}{ema50_str}
-regime:{regime} adx:{adx:.0f} +di:{plus_di:.0f} -di:{minus_di:.0f}{m5_sw}{m5_ema_pos}
-der:{der_val:.3f}{der_extra} delta:{of.get('delta', 0):+.1f} wall:{wall} {pb_raw}{m5_range_str}{extra_data_str}{h1_struct_str}{m5_struct_str}{h1c_part}{m5c_part}{news_part}"""
+        return f"""price:{current_price:.0f} sess:{session} {ema_summary}{bias_lvl_str}{ema50_str}
+regime:{regime}({regime_conf}) adx:{adx:.0f} +di:{plus_di:.0f} -di:{minus_di:.0f} atr:{atr:.0f}{m5_sw}{m5_ema_pos}
+order_flow:{der_val:.3f} flow_dir:{der_dir}{der_extra} delta:{of.get('delta', 0):+.1f} wall:{wall}
+pullback:{pb_raw}
+poc:{poc:.0f} vah:{vah:.0f} val:{val:.0f} funding:{funding:.6f} oi_chg:{oi_chg_pct:+.2f}%{m5_range_str}{extra_data_str}{h1_struct_str}{m5_struct_str}{h1c_part}{m5c_part}{news_part}"""
 
     def _build_prompt(self, context: str) -> str:
-        """v27.3: Expert role + raw data"""
-        return f"""You are a BTC institutional order flow analyst specializing in Smart Money Concepts (SMC) and M5 scalping.
+        """v37.4: System prompt with role + skills + data format (cached)"""
+        return [
+            {"role": "system", "content": """You are a BTC futures institutional order flow analyst.
+Timeframe: M5 scalping (5-30 minute trades).
+Your edge: reading institutional footprint through order flow, walls, and market structure.
 
-Your expertise:
-- Read EMA alignment to determine H1 trend structure (EMA9>EMA20>EMA50=bullish cascade, inverse=bearish)
-- Read swing structure: HH+HL=uptrend, LH+LL=downtrend, HH+LL=expansion, LH+HL=compression
-- Interpret order flow: DER shows directional conviction, delta shows net buying/selling, wall shows institutional defense
-- Assess pullback quality: ema_dist near zero + vol_declining = pullback ending, price returning to mean
-- Use ema50_dist to gauge macro positioning: negative=below EMA50(bearish macro), positive=above(bullish macro)
-- bias level: STRONG>CONFIRMED+>CONFIRMED>EARLY>NONE — higher=more layers agree on direction
-- POC=volume magnet price, funding extreme(>0.01%=crowded long, <-0.01%=crowded short), oi_chg(+price+oi=real move, +price-oi=fake)
+Skills:
+1. Order flow: order_flow shows institutional conviction. flow_dir shows their direction. High order_flow (>0.6) + aligned delta = strong institutional move.
+2. Wall analysis: Large ASK wall = price ceiling (sellers defending). Large BID wall = price floor (buyers defending). Wall >=5x = very strong barrier.
+3. EMA structure: 9>20>50 = bullish cascade. Inverse = bearish. Mixed = no clear trend.
+4. Swing structure: HH+HL = uptrend. LH+LL = downtrend. Confirms or denies EMA signals.
+5. Mean reversion: Price far from H1 EMA (high pullback_dist) + large wall blocking = price likely reverts to mean.
+6. Regime: RANGING/CHOPPY = breakouts often fake. Only trust strong order_flow (>0.6) with wall confirmation.
 
-Analyze next 5-30 minutes:
+Decision:
+- BUY: order_flow strong + flow_dir LONG + wall BID supporting or no ASK blocking
+- SELL: order_flow strong + flow_dir SHORT + wall ASK supporting or no BID blocking
+- WAIT: order_flow weak (<0.3) OR signals conflict OR no clear edge
 
-{context}
+Data keys:
+- order_flow: 0-1 (>0.6=strong <0.3=noise), flow_dir: LONG/SHORT
+- persist: candles of flow, sustain: TOO_EARLY=fresh FADING=exhausting
+- wall: ASK/BID + ratio (>=5x=strong barrier)
+- ema_pos: ABOVE_ALL/BETWEEN/BELOW_ALL, h1_bias: trend + level
+- regime(conf): TRENDING/CHOPPY/RANGING + HIGH/LOW
+- candles: dir|range$|body%|wick (▲bull ▼bear ↑upper ↓lower)
+- swing: HH+HL=up LH+LL=down
 
-Format: Candles ▲/▼=dir, number=range$, b%=body ratio, ↑=upper wick dominant, ↓=lower wick dominant
-DER: 0-1 (>0.6=strong institutional flow, <0.3=retail noise)
-
-Respond with ONLY a single JSON object, no markdown, no explanation:
-{{"bias":"BULLISH/BEARISH/NEUTRAL","confidence":0-100,"action":"TRADE/WAIT/CAUTION","reason":"max 80 chars, cite values"}}"""
+JSON only: {"signal":"BUY/SELL/WAIT","reason":"80 chars, cite values"}"""},
+            {"role": "user", "content": context}
+        ]
 
     @log_errors
     @timed_metric("AIMarketAnalyzer.analyze")
@@ -299,9 +347,7 @@ Respond with ONLY a single JSON object, no markdown, no explanation:
             # Call OpenRouter (async via AsyncOpenAI)
             response = await self._client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
+                messages=prompt  # v37.3: [system, user] format
             )
             
             # Parse JSON response
@@ -331,13 +377,30 @@ Respond with ONLY a single JSON object, no markdown, no explanation:
 
             result = json.loads(text)
             
-            # Validate
-            result['bias'] = result.get('bias', 'NEUTRAL').upper()
-            result['confidence'] = max(0, min(100, int(result.get('confidence', 50))))
-            result['action'] = result.get('action', 'WAIT').upper()
+            # v37.5: Map new 2-field format to internal format (no confidence)
+            # New: {"signal":"BUY/SELL/WAIT","reason":"..."}
+            # Internal: {"bias","confidence","action","reason"}
+            signal = result.get('signal', 'WAIT').upper()
+            result['bias'] = 'BULLISH' if signal == 'BUY' else 'BEARISH' if signal == 'SELL' else 'NEUTRAL'
+            result['confidence'] = 0  # v37.5: not used - set 0 for backward compat
+            result['action'] = 'TRADE' if signal == 'BUY' else 'TRADE' if signal == 'SELL' else 'WAIT'
             result['reason'] = result.get('reason', '')[:200]
             result['key_level'] = float(result.get('key_level', 0))
             result['timestamp'] = now.isoformat()
+            
+            # v35.1: Add market context to AI log
+            result['price'] = current_price
+            result['regime'] = binance_data.get('regime', '')
+            result['m5_state'] = binance_data.get('m5_state', '')
+            result['h1_dist'] = binance_data.get('h1_ema_dist_pct', 0)
+            # Get DER from order_flow_summary
+            of = binance_data.get('order_flow_summary', {})
+            result['der'] = of.get('der', 0)
+            # Get wall info
+            ws = binance_data.get('wall_scan', {})
+            wall_dom = ws.get('raw_dominant', 'N')
+            wall_ratio = ws.get('raw_ratio', 1)
+            result['wall'] = f"{wall_dom} {wall_ratio:.1f}x"
             
             # Cache
             self._cached_result = result
@@ -421,19 +484,13 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
                 return {'approve': True, 'confidence': 0, 'reason': 'AI parse fail'}
 
             result = json.loads(text)
-            approve = result.get('approve', True)
-            raw_confidence = max(0, min(100, int(result.get('confidence', 50))))
+            # v37.5: Map new 2-field format (no confidence)
+            signal = result.get('signal', 'WAIT').upper()
+            approve = signal in ('BUY', 'SELL')
             reason = result.get('reason', '')[:80]
             
-            # v33.0: Efficiency-Weighted Confidence (EWC)
-            snap = binance_data.get('snapshot')
-            m5_efficiency = getattr(snap, 'm5_efficiency', 0.5) if snap else 0.5
-            # Target efficiency 0.5, if < 0.2 penalize
-            if m5_efficiency < 0.2:
-                confidence = int(raw_confidence * 0.5)
-                reason = f"[EWC-PENALTY] {reason}"
-            else:
-                confidence = raw_confidence
+            # v37.5: confidence not used
+            confidence = 0
 
             self._last_ai_result = {
                 'bias': direction if approve else 'NEUTRAL',
@@ -454,14 +511,11 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
             return {'approve': True, 'confidence': 0, 'reason': f'AI error: {str(e)[:50]}'}
 
     def _save_to_log(self, result: Dict):
-        """บันทึกผลการวิเคราะห์ลง log file"""
+        """v36.2: Save to database instead of JSONL"""
         try:
-            log_path = self._ai_analysis_log_path
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, 'a') as f:
-                f.write(json.dumps(result, default=str) + '\n')
+            self._db.insert_ai_analysis(result)
         except Exception as e:
-            logger.debug(f"[AI] Log save error: {e}")
+            logger.debug(f"[AI] DB save error: {e}")
     
     # ==================== Auto Accuracy Tracking ====================
     
@@ -611,51 +665,39 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
         return None
 
     def _save_market_result(self, result: Dict):
-        """บันทึก market result แยกไฟล์ (v18.6)"""
+        """v36.2: Save to database instead of JSONL"""
         try:
-            log_path = self._ai_market_results_path
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, 'a') as f:
-                f.write(json.dumps(result, default=str) + '\n')
+            self._db.insert_ai_market_result(result)
         except Exception as e:
-            logger.debug(f"[AI] Market result save error: {e}")
+            logger.debug(f"[AI] Market result DB save error: {e}")
     
     def _save_accuracy_log(self, result: Dict):
-        """บันทึก accuracy log — สะสมทุกครั้ง"""
+        """v36.2: Save to database instead of JSONL"""
         try:
-            log_path = self._ai_accuracy_log_path
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-
             result['timestamp'] = datetime.now(timezone.utc).isoformat()
-
-            with open(log_path, 'a') as f:
-                f.write(json.dumps(result, default=str) + '\n')
+            self._db.insert_ai_accuracy_log(result)
         except Exception as e:
-            logger.debug(f"[AI] Accuracy log save error: {e}")
+            logger.debug(f"[AI] Accuracy log DB save error: {e}")
     
     def _calculate_cumulative_accuracy(self) -> Dict:
-        """คำนวณ cumulative accuracy จาก market results (v18.6)"""
+        """v36.2: Calculate cumulative accuracy from database"""
         try:
-            log_path = self._ai_market_results_path
-            if not log_path.exists():
-                return {'total': 0, 'correct': 0, 'accuracy': 0}
+            results = self._db.get_ai_market_results(limit=1000)
             
             correct = 0
             total = 0
             
-            with open(log_path, 'r') as f:
-                for line in f:
-                    r = json.loads(line.strip())
-                    ai_bias = r.get('ai_bias', 'NEUTRAL')
-                    actual = r.get('actual_direction', 'NEUTRAL')
-                    
-                    # NEUTRAL ไม่นับ
-                    if ai_bias == 'NEUTRAL':
-                        continue
-                    
-                    if ai_bias == actual:
-                        correct += 1
-                    total += 1
+            for r in results:
+                ai_bias = r.get('bias', 'NEUTRAL')
+                actual = r.get('actual_direction', 'NEUTRAL')
+                
+                # NEUTRAL ไม่นับ
+                if ai_bias == 'NEUTRAL':
+                    continue
+                
+                if ai_bias == actual:
+                    correct += 1
+                total += 1
             
             accuracy = round((correct / total) * 100, 1) if total > 0 else 0
             
@@ -694,11 +736,8 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
                 'result_timestamp': datetime.now(timezone.utc).isoformat()
             }
             
-            # Save to market result log
-            log_path = self._ai_market_results_path
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, 'a') as f:
-                f.write(json.dumps(result, default=str) + '\n')
+            # v36.2: Save to database instead of JSONL
+            self._db.insert_ai_market_result(result)
             
             logger.info(
                 f"[AI] Market Result | Actual:{actual_direction} | "
@@ -710,40 +749,24 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
     
     async def evaluate_accuracy(self, candles_m5, current_price: float) -> Optional[Dict]:
         """
-        ประเมินความแม่นยำของ AI โดยเทียบกับผลตลาดจริง
-        
-        เรียกหลังจากผ่านไป 1+ ชม. หลัง AI วิเคราะห์
+        v36.2: Evaluate AI accuracy using database instead of JSONL
         
         Returns:
             {'total': N, 'correct': M, 'accuracy': P%}
         """
         try:
-            import pandas as pd
-            
-            # Load AI analysis logs
-            ai_log_path = self._ai_analysis_log_path
-            if not ai_log_path.exists():
-                return None
-            
-            ai_logs = []
-            with open(ai_log_path, 'r') as f:
-                for line in f:
-                    ai_logs.append(json.loads(line.strip()))
-            
+            # Get AI analysis from DB
+            ai_logs = self._db.get_ai_analysis(limit=500)
             if len(ai_logs) < 5:
                 return None
             
-            # Load market results
-            market_path = self._ai_market_results_path
-            market_results = {}
-            if market_path.exists():
-                with open(market_path, 'r') as f:
-                    for line in f:
-                        r = json.loads(line.strip())
-                        market_results[r['ai_timestamp']] = r
-            
+            # Get market results from DB
+            market_results = self._db.get_ai_market_results(limit=500)
             if not market_results:
                 return None
+            
+            # Create lookup dict
+            market_dict = {r.get('timestamp') or r.get('ai_timestamp'): r for r in market_results}
             
             # Compare AI bias vs actual direction
             correct = 0
@@ -751,10 +774,10 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
             
             for ai in ai_logs:
                 ts = ai.get('timestamp')
-                if ts not in market_results:
+                if ts not in market_dict:
                     continue
                 
-                market = market_results[ts]
+                market = market_dict[ts]
                 ai_bias = ai.get('bias', 'NEUTRAL')
                 actual = market.get('actual_direction', 'NEUTRAL')
                 
@@ -794,6 +817,10 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
         return (direction == 'LONG' and bias == 'BULLISH') or \
                (direction == 'SHORT' and bias == 'BEARISH')
     
+    def update_market_context(self, binance_data: dict):
+        """v35.2: Cache latest market data for close context."""
+        self._last_binance_data = binance_data
+    
     def log_trade_entry(self, signal_id: str, signal: Dict, ai_analysis: Optional[Dict], market_context: Optional[Dict] = None):
         """
         v26.0: บันทึก trade entry + AI + market context ทั้งหมดที่บอทวิเคราะห์
@@ -821,6 +848,11 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
                 'ai_action': ai_analysis.get('action') if ai_analysis else None,
                 'ai_reason': ai_analysis.get('reason', '')[:100] if ai_analysis else None,
                 'ai_aligned': aligned,
+                # v34.6: Track NEUTRAL + low confidence for analysis
+                'ai_neutral_low_conf': (
+                    ai_analysis.get('bias') == 'NEUTRAL' and
+                    ai_analysis.get('confidence', 100) < 50
+                ) if ai_analysis else False,
 
                 # Status tracking
                 'status': 'SIGNAL_SENT',
@@ -858,8 +890,8 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
                     'poc': market_context.get('poc'),
                     'vah': market_context.get('vah'),
                     'val': market_context.get('val'),
-                    # Score breakdown
-                    'breakdown': market_context.get('breakdown'),
+                    # Score breakdown (MOD-9: Fixed - get from signal, not market_context)
+                    'breakdown': signal.get('score_breakdown') or signal.get('breakdown') or market_context.get('breakdown'),
                     # v29.1: Missing fields for analysis
                     'm5_state': market_context.get('m5_state'),
                     'regime': market_context.get('regime'),
@@ -874,8 +906,8 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
                     
                 })
             
-            with open(self._log_path, 'a') as f:
-                f.write(json.dumps(entry, default=str) + '\n')
+            # v36.0: Use DB instead of JSONL
+            self._db.insert_trade(entry)
             
             logger.info(
                 f"[AI] Signal Sent | {signal_id} | {signal.get('direction')} "
@@ -914,16 +946,14 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
                 'ai_confidence': ai_analysis.get('confidence') if ai_analysis else None,
                 'ai_action': ai_analysis.get('action') if ai_analysis else None,
                 'ai_reason': ai_analysis.get('reason', '')[:100] if ai_analysis else None,
-                'ai_aligned': aligned,
+                'ai_aligned': 1 if aligned is True else 0 if aligned is False else None,
                 
                 # Result
                 'result': 'SKIPPED',
             }
             
-            log_path = self._ai_skipped_log_path
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, 'a') as f:
-                f.write(json.dumps(entry, default=str) + '\n')
+            # v36.0: Use DB instead of JSONL
+            self._db.insert_ai_skipped(entry)
             
             logger.info(
                 f"[AI] Skipped | {mode} {direction} | Blocked:{gate_blocked} | "
@@ -934,37 +964,15 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
             logger.debug(f"[AI] Skipped log error: {e}")
     
     def log_trade_opened(self, signal_id: str, actual_entry_price: float = 0):
-        """
-        EA ยืนยันว่าเปิด trade จริง (v19.0)
-        
-        Args:
-            signal_id: Signal ID to match
-            actual_entry_price: ราคาที่ EA เปิดจริง
-        """
+        """v36.2: Update trade status to OPENED in database"""
         try:
-            if not self._log_path.exists():
-                return
-            
-            lines = []
-            updated = False
-            
-            with open(self._log_path, 'r') as f:
-                for line in f:
-                    record = json.loads(line.strip())
-                    if record.get('signal_id') == signal_id and record.get('status') == 'SIGNAL_SENT':
-                        record['status'] = 'OPENED'
-                        record['ea_opened'] = True
-                        record['opened_at'] = datetime.now(timezone.utc).isoformat()
-                        if actual_entry_price > 0:
-                            record['actual_entry_price'] = actual_entry_price
-                        updated = True
-                        logger.info(f"[AI] Trade Opened | {signal_id}")
-                    lines.append(json.dumps(record, default=str))
-
-            if updated:
-                with open(self._log_path, 'w') as f:
-                    f.write('\n'.join(lines) + '\n')
-                    
+            self._db.update_trade(signal_id, {
+                'status': 'OPENED',
+                'ea_opened': True,
+                'opened_at': datetime.now(timezone.utc).isoformat(),
+                'actual_entry_price': actual_entry_price if actual_entry_price > 0 else None
+            })
+            logger.info(f"[AI] Trade Opened | {signal_id}")
         except Exception as e:
             logger.debug(f"[AI] Trade opened log error: {e}")
     
@@ -972,104 +980,89 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
         """
         EA ปิด trade — update status to WIN/LOSS/BE (v19.0)
         v26.0: Added MFE/MAE (max favorable/adverse excursion from entry)
+        v36.0: Use SQLite DB instead of JSONL
         """
         try:
-            if not self._log_path.exists():
-                return
+            # Prepare updates
+            updates = {
+                'status': 'WIN' if pnl > 0 else 'LOSS' if pnl < 0 else 'BE',
+                'pnl': round(pnl, 2),
+                'exit_reason': exit_reason,
+                'closed_at': datetime.now(timezone.utc).isoformat(),
+            }
+            if mfe > 0:
+                updates['mfe'] = round(mfe, 2)
+            if mae > 0:
+                updates['mae'] = round(mae, 2)
             
-            lines = []
-            updated = False
+            # v35.2: Add close context from cached binance_data
+            bd = self._last_binance_data
+            if bd:
+                updates['price_at_close'] = bd.get('current_price', 0)
+                updates['regime_at_close'] = bd.get('regime', '')
+                updates['m5_state_at_close'] = bd.get('m5_state', '')
+                # Get wall info
+                ws = bd.get('wall_scan', {})
+                wall_dom = ws.get('raw_dominant', 'N') if ws else 'N'
+                wall_ratio = ws.get('raw_ratio', 1) if ws else 1
+                updates['wall_at_close'] = f"{wall_dom} {wall_ratio:.1f}x"
+                updates['delta_at_close'] = round(bd.get('delta', 0), 1)
+                updates['der_at_close'] = round(bd.get('der', 0), 3)
+                updates['h1_dist_at_close'] = round(bd.get('h1_ema_dist_pct', 0), 2)
+                updates['h1_bias_at_close'] = bd.get('h1_bias', '')
             
-            with open(self._log_path, 'r') as f:
-                for line in f:
-                    record = json.loads(line.strip())
-                    if record.get('signal_id') == signal_id and record.get('status') == 'OPENED':
-                        record['status'] = 'WIN' if pnl > 0 else 'LOSS' if pnl < 0 else 'BE'
-                        record['pnl'] = round(pnl, 2)
-                        record['exit_reason'] = exit_reason
-                        record['closed_at'] = datetime.now(timezone.utc).isoformat()
-                        if mfe > 0: record['mfe'] = round(mfe, 2)
-                        if mae > 0: record['mae'] = round(mae, 2)
-                        updated = True
-                        
-                        # Log summary
-                        aligned = record.get('ai_aligned')
-                        status = record['status']
-                        logger.info(
-                            f"[AI] Trade Result | {signal_id} → {status} | PnL:{pnl:+.2f} | "
-                            f"AI {'✓ aligned' if aligned else '✗ conflict'} "
-                            f"({record.get('ai_bias')} {record.get('ai_confidence')}%)"
-                        )
-                    
-                    lines.append(json.dumps(record, default=str))
+            # Use DB update
+            self._db.update_trade(signal_id, updates)
             
-            if updated:
-                with open(self._log_path, 'w') as f:
-                    f.write('\n'.join(lines) + '\n')
+            # Get trade for logging
+            trade = self._db.get_trade(signal_id)
+            if trade:
+                aligned = trade.get('ai_aligned')
+                status = updates['status']
+                logger.info(
+                    f"[AI] Trade Result | {signal_id} → {status} | PnL:{pnl:+.2f} | "
+                    f"AI {'✓ aligned' if aligned else '✗ conflict'} "
+                    f"({trade.get('ai_bias')} {trade.get('ai_confidence')}%)"
+                )
 
         except Exception as e:
             logger.warning(f"[AI] Trade exit log error: {e}")
     
-    def cleanup_stale_signals(self, timeout_minutes: int = 5):
+    def cleanup_stale_signals(self, timeout_seconds: int = 30, timeout_minutes: int = None):
         """
-        SIGNAL_SENT ที่ไม่มี OPENED หลัง X นาที = EA_SKIPPED (v19.0)
-        
-        Args:
-            timeout_minutes: จำนวนนาทีที่รอ ค่า default = 5
+        v50.6: Clean up stale SIGNAL_SENT (30s) and OPENED (2h) trades
         """
         try:
-            if not self._log_path.exists():
-                return
-
             now = datetime.now(timezone.utc)
-            lines = []
-            cleaned = 0
+            ts = timeout_seconds
 
-            with open(self._log_path, 'r') as f:
-                for line in f:
-                    record = json.loads(line.strip())
-                    if record.get('status') == 'SIGNAL_SENT':
-                        sent_time = datetime.fromisoformat(record['timestamp'])
-                        age_min = (now - sent_time).total_seconds() / 60
-                        if age_min > timeout_minutes:
-                            record['status'] = 'EA_SKIPPED'
-                            record['skip_reason'] = f'No EA confirmation within {timeout_minutes}min'
-                            cleaned += 1
-                    # v25.0: Cleanup stale OPENED (EA closed but Python missed confirm)
-                    elif record.get('status') == 'OPENED':
-                        opened_at = record.get('opened_at') or record.get('timestamp', '')
-                        if opened_at:
-                            try:
-                                opened_time = datetime.fromisoformat(opened_at)
-                                age_hrs = (now - opened_time).total_seconds() / 3600
-                            except (ValueError, TypeError):
-                                age_hrs = 999  # v27.1: unparseable timestamp → force cleanup
-                            if age_hrs > 2:  # OPENED > 2 hours = stale (trade already closed)
-                                record['status'] = 'LOSS'
-                                record['pnl'] = 0
-                                record['exit_reason'] = 'STALE_CLEANUP'
-                                record['closed_at'] = now.isoformat()
-                                cleaned += 1
-                        else:
-                            # v27.1: no timestamp at all → orphan record → force cleanup
-                            record['status'] = 'LOSS'
-                            record['pnl'] = 0
-                            record['exit_reason'] = 'STALE_CLEANUP_NO_TIMESTAMP'
-                            record['closed_at'] = now.isoformat()
-                            cleaned += 1
-                    lines.append(json.dumps(record, default=str))
-
-            if cleaned > 0:
-                with open(self._log_path, 'w') as f:
-                    f.write('\n'.join(lines) + '\n')
-                logger.warning(f"[AI] Cleaned {cleaned} stale SIGNAL_SENT → EA_SKIPPED")
+            # Clean SIGNAL_SENT that are too old -> EA_SKIPPED
+            with self._db._conn() as conn:
+                skip_reason = f'No EA confirmation within {ts}s'
+                result = conn.execute("""
+                    UPDATE trades
+                    SET status = 'EA_SKIPPED',
+                        skip_reason = ?
+                    WHERE status = 'SIGNAL_SENT'
+                    AND timestamp < datetime('now', '-' || ? || ' seconds')
+                """, (skip_reason, str(ts)))
+                
+                signal_sent_cleaned = result.rowcount
+            
+            # v50.8: OPENED trades are NOT auto-cleaned — wait for EA confirm
+            # EA will send TP/SL/CLOSED confirmation when trade closes
+            opened_cleaned = 0
+            
+            total_cleaned = signal_sent_cleaned + opened_cleaned
+            if total_cleaned > 0:
+                logger.warning(f"[AI] Cleaned {total_cleaned} stale trades (SIGNAL_SENT:{signal_sent_cleaned}, OPENED:{opened_cleaned})")
                 
         except Exception as e:
             logger.warning(f"[AI] Cleanup error: {e}")
     
     def get_trade_summary(self) -> Dict:
         """
-        สรุปผล trade ทั้งหมด (v19.0 - นับเฉพาะ OPENED + closed)
+        v36.2: Get trade summary from database
         
         Returns:
             {'total': N, 'wins': W, 'losses': L, 'win_rate': X%,
@@ -1078,34 +1071,25 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
              'signal_sent': S, 'opened': O, 'skipped': K, 'pending': P}
         """
         try:
-            if not self._log_path.exists():
-                return {'total': 0, 'wins': 0, 'losses': 0, 'win_rate': 0}
+            trades = self._db.get_trades(limit=1000)
             
             total = wins = losses = 0
             aligned_wins = aligned_losses = 0
             conflict_wins = conflict_losses = 0
-            signal_sent = opened = skipped = pending = 0
+            signal_sent = opened = skipped = 0
             
-            with open(self._log_path, 'r') as f:
-                for line in f:
-                    record = json.loads(line.strip())
-                    status = record.get('status')
-                    
-                    # v19.0: นับเฉพาะ trade ที่เปิดจริง + ปิดแล้ว
-                    if status == 'SIGNAL_SENT':
-                        signal_sent += 1
-                        continue
-                    elif status == 'OPENED':
-                        opened += 1
-                        continue  # ยังไม่ปิด
-                    elif status == 'EA_SKIPPED':
-                        skipped += 1
-                        continue  # ไม่นับใน accuracy
-                    
-                    # นับเฉพาะ WIN/LOSS/BE (trade ที่เปิดจริง + ปิดแล้ว)
-                    if status not in ('WIN', 'LOSS', 'BE', 'OPENED'):
-                        continue
-                    
+            for record in trades:
+                status = record.get('status')
+                
+                # Count by status
+                if status == 'SIGNAL_SENT':
+                    signal_sent += 1
+                elif status == 'OPENED':
+                    opened += 1
+                elif status == 'EA_SKIPPED':
+                    skipped += 1
+                # Count closed trades
+                elif status in ('WIN', 'LOSS', 'BE'):
                     total += 1
                     aligned = record.get('ai_aligned')
                     
@@ -1124,7 +1108,6 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
             
             win_rate = round((wins / total * 100), 1) if total > 0 else 0
             
-            # v26.4: pending = SIGNAL_SENT (รอ EA confirm)
             return {
                 'total': total,
                 'wins': wins,
@@ -1137,7 +1120,7 @@ Respond JSON ONLY: {{"approve":true/false,"confidence":0-100,"reason":"max 80 ch
                 'signal_sent': signal_sent,
                 'opened': opened,
                 'skipped': skipped,
-                'pending': signal_sent,  # pending = signal sent but no EA confirmation yet
+                'pending': signal_sent,
             }
         except Exception as e:
             logger.warning(f"[AI] Trade summary error: {e}")

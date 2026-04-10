@@ -1,47 +1,58 @@
-﻿# Architecture Plan — BTC M5 Scalping Bot
-**Status:** PHASE 1 COMPLETED & VERIFIED (v33.1)
-**Date:** 2026-03-30
-**Lead Architect:** Arch (Lead Architect)
-**Based on:** Analyst Report (Deep Trade Analysis)
+# Architecture Plan — v75.0 — Symmetric Trend Support Sniper
+**Status:** 🔲 PENDING
+**Date:** 2026-04-07
+**Lead Architect:** Arch
 
 ---
 
-## 🎯 Strategic Optimization (v33.1)
+## 1. REVERSAL: Trend Support Sniper Lane (MOD-96)
 
-### 1. 🛡️ Regime-Adaptive Execution (RAE) [COMPLETED]
-**Findings:** 100% of recent LOSS trades occurred in `regime: RANGING`.
-**Implementation:**
-- **Dynamic Gating:** In `RANGING` mode, only `IPAF_POC` or `Mean Reversion` signals are allowed. `MOMENTUM` signals are automatically suppressed.
-- **Stop Loss Adjustment:** Use tighter ATR-based SL during ranging markets.
+**Objective:** ปลดล็อกจุดเข้า "ย่อซื้อ/เด้งขาย" (Buy the Dip / Sell the Rally) ที่บริเวณเส้นค่าเฉลี่ย H1 ซึ่งเป็นจุดที่ได้เปรียบที่สุด แต่ปัจจุบันถูกบล็อกด้วยกฎ H1 Distance > 0.5%
 
-### 2. 🧱 Mandatory Order Flow Verification (MOFV) [COMPLETED]
-**Findings:** AI occasionally ignores massive opposite-side walls (e.g., 154x ASK wall during LONG bias).
-**Implementation:**
-- **Hard-Coded Contradiction Check:** Blocks trades if opposite wall ratio >= 50x.
-- **Wall Logic Calibration:** Signal now carries `wall_scan` data for gate verification.
+### **Actions: Lane C - Trend Support (Symmetric)**
+อนุญาตให้เทรด Reversal ได้แม้ **H1 Dist < 0.5%** หากเข้าเงื่อนไข **"3 ประสานแห่งการพักตัว"** ครบทุกข้อ:
 
-### 3. ⚡ Execution Latency & EA Bridge (ELEB) [IN PROGRESS]
-**Findings:** High `EA_SKIPPED` rate due to "No EA confirmation within 2min".
-**Implementation:**
-- **Optimization:** (Pending Phase 2) Profile Signal -> Webhook -> EA latency.
-
-### 4. ⚖️ Efficiency-Weighted Confidence (EWC) [COMPLETED]
-**Findings:** High AI confidence (85%+) often fails when `m5_efficiency` is low (< 0.15).
-**Implementation:**
-- **Adjusted Confidence Score:** Penalty of 50% applied to AI confidence if `m5_efficiency` < 0.20.
+1.  **Trend Alignment (ทิศทางหลัก):**
+    *   **LONG:** H1 Bias == BULLISH
+    *   **SHORT:** H1 Bias == BEARISH
+2.  **M5 Deep Stretch (แรงย่อถึงจุดพีค):**
+    *   **LONG:** ราคาต้องอยู่ใต้เส้น M5 EMA20 > 70 pts
+    *   **SHORT:** ราคาต้องอยู่เหนือเส้น M5 EMA20 > 70 pts
+3.  **Institutional Hard Confirmation (สถาบันยืนยัน):**
+    *   **Wall Ratio:** ต้องหนา **> 5.0x** (ป้องกันการไหลทะลุเส้นแนวรับ/ต้านใหญ่)
+    *   **DER Force:** ต้องอ่อนแรงสุดขีด **< 0.15** (ยืนยันว่า Pullback จบแล้ว ไม่ใช่เทรนด์เปลี่ยนทิศ)
+    *   **OI Change:** ต้องเป็นบวก **> 0.0%** (มีเงินใหม่เข้ามาช่วยยันที่เส้น)
 
 ---
 
-## 🛠️ Updated Roadmap (Q2 2026)
+## 2. REVERSAL: Triple-Lane Decision Matrix
 
-### Phase 1: Engine Hardening (COMPLETED)
-- [x] Implement **RAE** (Regime-Adaptive Execution) in `signals/signal_gate.py`.
-- [x] Implement **MOFV** (Mandatory Order Flow Verification) in `signals/signal_gate.py`.
-- [x] Implement **EWC** (Efficiency-Weighted Confidence) in `analysis/ai_analyzer.py`.
-
-### Phase 2: Bridge Optimization (NEXT)
-- [ ] Profile the Signal -> Webhook -> EA latency.
-- [ ] Optimize MT5 EA tick handler for faster signal acquisition.
+ปรับโครงสร้าง Reversal เป็น 3 เลนเพื่อให้ครอบคลุมทุกโอกาส:
+- **Lane A (Standard):** H1 Dist > 0.5% + Wall > 1.4x + Exhaustion (<0.15)
+- **Lane B (V-Shape):** H1 Dist > 0.5% + Wall > 5.0x + V-Shape (>0.35)
+- **Lane C (Trend Sniper):** H1 Dist < 0.5% + Wall > 5.0x + Exhaustion (<0.15) + **Trend Support**
 
 ---
-*Architecture plan updated and verified by Audit.*
+
+## 3. Implementation History (Consolidated)
+
+| MOD | Description | Status |
+|-----|-------------|--------|
+| 1-92 | Momentum & Global Fixes | ✅ FIXED |
+| 93-94 | Reversal Dual-Confirmation & Buffer | ✅ FIXED |
+| 95 | Momentum Sensitivity Tuning (v74.0) | ✅ FIXED |
+| 96 | Reversal Lane C: Trend Support Sniper | 🔲 PENDING |
+
+---
+
+## System Reference (v75.0 Target)
+`
+REVERSAL:     3-Lane System (Standard | V-Shape | Trend Support)
+MOMENTUM:     2-Lane System (Perfect Alignment | Pure Force Rocket)
+IPA:          Adaptive Tension Sniper (H1 Dist > 0.5% for Late Bias)
+ABSORPTION:   Flexible Wall (30x or 15x+ER>0.4) + ATR_R < 1.2
+`
+
+---
+
+*Architecture Plan v75.0 — Buying the dip with institutional precision.*

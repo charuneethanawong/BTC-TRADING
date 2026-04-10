@@ -1107,6 +1107,25 @@ class ICTAnalyzer:
             'price_pct': (current_price - low) / (high - low) if (high - low) > 0 else 0.5
         }
     
+    def get_last_sweep(self, candles: pd.DataFrame, current_price: float) -> Optional[Dict]:
+        """v43.7: Get last liquidity sweep — standalone method for Trigger Layer."""
+        if candles is None or len(candles) < 20:
+            return None
+        sweep_type, sweep_level, sweep_context, sweep_quality = self._detect_liquidity_sweep(
+            candles, current_price
+        )
+        if not sweep_type:
+            return None
+        # Find the candle time of the sweep
+        last_candle_time = candles.index[-1] if hasattr(candles, 'index') else None
+        return {
+            'type': sweep_type,
+            'price': sweep_level,
+            'context': sweep_context,
+            'quality': sweep_quality,
+            'time': last_candle_time,
+        }
+
     def get_ict_summary(
         self, 
         candles: pd.DataFrame,

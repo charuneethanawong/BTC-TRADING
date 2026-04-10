@@ -2,18 +2,19 @@
 Pullback Detector - v18.0
 Detects structural pullbacks using EMA distance, volume, and slope.
 Distinguishes between True and False pullbacks.
-v18.0: Persist state to JSON file (survive bot restart) - CLEAN VERSION
+v36.2: Migrated from JSON file to SQLite
 """
 import pandas as pd
 import numpy as np
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional
+from ..data.db_manager import get_db
 
 
 class PullbackDetector:
-    STATE_FILE = 'data/pullback_state.json'
-
+    """v36.2: Uses database instead of JSON file"""
+    
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
         self.ema_h1_period = 20
@@ -28,33 +29,30 @@ class PullbackDetector:
         self._pb_slope_resumed = False    
         self._pb_ended = False            
         
-        # v18.0: Load state from file
+        # v36.2: Load state from database
         self._load_state()
 
     def _load_state(self):
-        """Load state from JSON file."""
+        """Load state from database (v36.2)."""
         try:
-            path = Path(self.STATE_FILE)
-            if path.exists():
-                with open(path, 'r') as f:
-                    state = json.load(f)
+            db = get_db()
+            state = db.get_state('pullback')
+            if state:
                 self._pb_active = state.get('pb_active', False)
                 self._pb_ended = state.get('pb_ended', False)
-                self._pb_direction = state.get('pb_direction', None)
+                self._pb_direction = state.get('pb_direction')
         except Exception:
             pass
 
     def _save_state(self):
-        """Save state to JSON file."""
+        """Save state to database (v36.2)."""
         try:
-            path = Path(self.STATE_FILE)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, 'w') as f:
-                json.dump({
-                    'pb_active': self._pb_active,
-                    'pb_ended': self._pb_ended,
-                    'pb_direction': self._pb_direction
-                }, f)
+            db = get_db()
+            db.set_state('pullback', {
+                'pb_active': self._pb_active,
+                'pb_ended': self._pb_ended,
+                'pb_direction': self._pb_direction
+            })
         except Exception:
             pass
 

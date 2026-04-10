@@ -284,7 +284,10 @@ class RiskManager:
         # Trading state
         self.is_trading_enabled = True
         self.pause_reason = ""
-        self.tier = 0  # P1.1: Initialize tier to prevent AttributeError in check_trading_allowed()
+        self.tier = 0
+        self.drawdown_pct = 0.0
+        self.equity = 0.0
+        self.balance = 0.0
         
         # P3.1: Mode-specific risk multipliers
         self.mode_risk_multipliers = {
@@ -410,6 +413,9 @@ class RiskManager:
         
         # Calculate Drawdown
         drawdown_pct = ((balance - equity) / balance) * 100 if equity < balance else 0
+        self.drawdown_pct = drawdown_pct
+        self.equity = equity
+        self.balance = balance
         
         # Get thresholds from config (with defaults for testing)
         tier_1 = drawdown_config.get('tier_1_threshold', 2.0)

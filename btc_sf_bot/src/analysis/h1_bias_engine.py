@@ -215,11 +215,11 @@ class H1BiasEngine:
         dir_display = "BULLISH" if direction == "LONG" else "BEARISH" if direction == "SHORT" else "NEUTRAL"
         gate_status = "PASSED" if direction else "FAILED"
         
-        logger.info(
-            f"[H1Bias] {gate_status} | {dir_display} | {bias_level} | "
-            f"{l0} {l1} {l2} {l3} | EMA9:{last_ema9:.0f} EMA20:{last_ema20:.0f} EMA50:{last_ema50:.0f} | "
-            f"C:{last_close:.0f} | adj:{score_adj:+d}"
-        )
+                # logger.info(
+        # f"[H1Bias] {gate_status} | {dir_display} | {bias_level} | "
+        # f"{l0} {l1} {l2} {l3} | EMA9:{last_ema9:.0f} EMA20:{last_ema20:.0f} EMA50:{last_ema50:.0f} | "
+        # f"C:{last_close:.0f} | adj:{score_adj:+d}"
+        # )
         
         # Layer directions for dashboard
         l0_dir = 'BULLISH' if layer0_bull else 'BEARISH' if layer0_bear else 'NEUTRAL'

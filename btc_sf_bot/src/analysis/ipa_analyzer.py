@@ -185,14 +185,42 @@ class IPAAnalyzer:
                 return None
 
             # === Calculate indicators (v27.0: use provided atr_m5 if available) ===
-            self._prepare_indicators(candles_m5, candles_h1, atr_m5)
+            self._prepare_indicators(candles_m5, candles_h1, atr_m5, snapshot=snapshot)  # v34.1: pass snapshot
 
             # === Gate 1: H1 Bias (v13.4: 3-Layer) ===
-            h1_result = self._check_h1_bias(candles_h1, candles_m5)
+            # v34.1: use unified engine result when provided, else fall back to local method
+            if h1_bias_result is not None:
+                br = h1_bias_result
+                # Map H1BiasResult dataclass → legacy dict expected by downstream gates
+                h1_result = {
+                    'direction': br.direction,
+                    'bias': br.bias,
+                    'bias_level': br.bias_level,
+                    'score_adjust': br.score_adj,
+                    'bos': True,
+                    'choch': br.l3 in ('BULLISH', 'BEARISH'),  # strong_bias proxy
+                    'fvg_unfilled': self._check_h1_fvg(candles_h1, br.direction) if br.direction else False,
+                    'ema9': br.ema9,
+                    'ema20': br.ema20,
+                    'ema50': br.ema50,
+                    'strong_bias': br.l3 in ('BULLISH', 'BEARISH'),
+                    'layer0_triggered': br.l0 in ('BULLISH', 'BEARISH'),
+                    'layer1_triggered': br.l1 in ('BULLISH', 'BEARISH'),
+                    'layer2_triggered': br.l2 in ('BULLISH', 'BEARISH'),
+                    'layer3_triggered': br.l3 in ('BULLISH', 'BEARISH'),
+                    'l0_direction': br.l0,
+                    'l1_direction': br.l1,
+                    'l2_direction': br.l2,
+                    'l3_direction': br.l3,
+                    'h1_swing_high': None,
+                    'h1_swing_low': None,
+                } if br.direction else None
+            else:
+                h1_result = self._check_h1_bias(candles_h1, candles_m5)
             # v25.0: Store for dashboard access
             self._last_h1_result = h1_result
             if h1_result is None:
-                return None  # Log already in _check_h1_bias
+                return None  # Log already in _check_h1_bias (or no bias direction)
 
             direction = h1_result['direction']
             h1_bias = h1_result['bias']
@@ -363,17 +391,22 @@ class IPAAnalyzer:
             self.logger.error(f"{self.log_prefix} Analysis error: {e}", exc_info=True)
             return None
 
-    def _prepare_indicators(self, candles_m5: pd.DataFrame, candles_h1: pd.DataFrame, atr_m5: Optional[float] = None):
+    def _prepare_indicators(self, candles_m5: pd.DataFrame, candles_h1: pd.DataFrame, atr_m5: Optional[float] = None,
+                            snapshot: Optional[Any] = None):
         """Calculate indicators used throughout analysis.
-        
+
         v27.0: If atr_m5 is provided (from MarketSnapshot), use it instead of calculating.
+        v34.1: If snapshot is provided, use snapshot.volume_ratio_m5 instead of re-calculating.
         """
         # ATR on M5 - use provided value or calculate
         self.atr_m5 = atr_m5 if atr_m5 is not None else self._calc_atr(candles_m5, period=14)
 
         # Volume stats
         self.avg_volume = candles_m5['volume'].iloc[-20:].mean()
-        self.volume_ratio = candles_m5['volume'].iloc[-1] / self.avg_volume if self.avg_volume > 0 else 1.0
+        if snapshot is not None:
+            self.volume_ratio = snapshot.volume_ratio_m5  # v34.1: use unified engine result
+        else:
+            self.volume_ratio = candles_m5['volume'].iloc[-1] / self.avg_volume if self.avg_volume > 0 else 1.0
 
     def _check_h1_bias(self, candles_h1: pd.DataFrame, candles_m5: pd.DataFrame) -> Optional[Dict]:
         """

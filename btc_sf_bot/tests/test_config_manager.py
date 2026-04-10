@@ -93,7 +93,7 @@ def test_config_manager_get_method():
                 'rr_min': 1.0
             },
             'iof': {
-                'score_threshold': 6,
+                'score_threshold': 8,
                 'der_min': 0.3,
                 'der_strong': 0.6,
                 'der_moderate': 0.45,
@@ -157,7 +157,7 @@ def test_config_manager_validation():
                 'rr_min': 1.0  # Valid range: 0.1-10.0
             },
             'iof': {
-                'score_threshold': 6,  # Valid range: 1-20
+                'score_threshold': 8,  # Valid range: 1-20
                 'der_min': 0.3,  # Valid range: 0.1-1.0
                 'der_strong': 0.6,  # Valid range: 0.1-1.0
                 'der_moderate': 0.45,  # Valid range: 0.1-1.0
@@ -269,7 +269,7 @@ def test_config_manager_hot_reload():
                     'rr_min': 1.0
                 },
                 'iof': {
-                    'score_threshold': 6,
+                     'score_threshold': 8,
                     'der_min': 0.3,
                     'der_strong': 0.6,
                     'der_moderate': 0.45,

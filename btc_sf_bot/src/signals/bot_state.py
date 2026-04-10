@@ -1,15 +1,17 @@
 """
 Bot State Manager Module
 Tracks current market structure state for v3.0 2-Phase Signal Generation
+v36.2: Migrated from JSON file to SQLite
 """
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from ..utils.logger import get_logger
 from ..enums import TrendState, BOSStatus
+from ..data.db_manager import get_db
 
 import json
-import os
+import math
 from pathlib import Path
 
 logger = get_logger(__name__)
@@ -34,7 +36,7 @@ class BotState:
         self.trend = TrendState.RANGE
         self.structure_quality = 0
         self.last_confirmed_high = 0.0
-        self.last_confirmed_low = float('inf')
+        self.last_confirmed_low = 0.0  # v34.0: Changed from float('inf') to prevent Infinity bug
         self.last_bos_time: Optional[datetime] = None
         self.last_bos_score = 0
         self.last_bos_status: Optional[BOSStatus] = None
@@ -100,6 +102,47 @@ class BotState:
             f"Score: {score} | Level: {level} | Status: {status.value}"
         )
         self.save_state()
+    
+    def check_staleness(self, current_price: float) -> bool:
+        """
+        v34.0: Check if structure is stale (>20% from current price) and reset if needed.
+        
+        Args:
+            current_price: Current market price
+            
+        Returns:
+            True if structure was reset due to staleness
+        """
+        if current_price <= 0:
+            return False
+            
+        staleness_threshold = 0.20  # 20%
+        reset_needed = False
+        
+        # Check high staleness
+        if self.last_confirmed_high > 0:
+            high_distance = abs(current_price - self.last_confirmed_high) / current_price
+            if high_distance > staleness_threshold:
+                logger.info(f"Structure staleness: high {self.last_confirmed_high:.0f} is {high_distance*100:.1f}% from current {current_price:.0f}")
+                self.last_confirmed_high = 0.0
+                reset_needed = True
+        
+        # Check low staleness
+        if self.last_confirmed_low > 0:
+            low_distance = abs(current_price - self.last_confirmed_low) / current_price
+            if low_distance > staleness_threshold:
+                logger.info(f"Structure staleness: low {self.last_confirmed_low:.0f} is {low_distance*100:.1f}% from current {current_price:.0f}")
+                self.last_confirmed_low = 0.0
+                reset_needed = True
+        
+        if reset_needed:
+            self.trend = TrendState.RANGE
+            self.structure_quality = 0
+            self.looking_for = None
+            self.save_state()
+            logger.info("Structure reset due to staleness")
+            
+        return reset_needed
     
     def set_pending_bos(self, validation_result: Dict, level: float, direction: str) -> None:
         """
@@ -243,15 +286,29 @@ class BotState:
     def get_state_dict(self) -> Dict:
         """
         Get current state as dictionary.
+        v34.0: Added validation to prevent Infinity/NaN values.
         
         Returns:
             Dictionary with current state
         """
+        # v34.0: Validate and fix Infinity/NaN values before saving
+        last_confirmed_high = self.last_confirmed_high
+        last_confirmed_low = self.last_confirmed_low
+        
+        # Check for infinity
+        if not isinstance(last_confirmed_high, (int, float)) or not math.isfinite(last_confirmed_high):
+            logger.warning(f"Invalid last_confirmed_high: {self.last_confirmed_high}, resetting to 0.0")
+            last_confirmed_high = 0.0
+            
+        if not isinstance(last_confirmed_low, (int, float)) or not math.isfinite(last_confirmed_low):
+            logger.warning(f"Invalid last_confirmed_low: {self.last_confirmed_low}, resetting to 0.0")
+            last_confirmed_low = 0.0
+        
         return {
             'trend': self.trend.value,
             'structure_quality': self.structure_quality,
-            'last_confirmed_high': self.last_confirmed_high,
-            'last_confirmed_low': self.last_confirmed_low,
+            'last_confirmed_high': last_confirmed_high,
+            'last_confirmed_low': last_confirmed_low,
             'last_bos_time': self.last_bos_time.isoformat() if self.last_bos_time else None,
             'last_bos_score': self.last_bos_score,
             'last_bos_status': self.last_bos_status.value if self.last_bos_status else None,
@@ -289,31 +346,33 @@ class BotState:
         """
         return self.state_history[-count:]
     
-    def save_state(self, filepath: str = "data/bot_state.json") -> bool:
-        """Save current state to JSON file."""
+    def save_state(self) -> bool:
+        """Save current state to database (v36.2)."""
         try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            db = get_db()
             state = self.get_state_dict()
-            with open(filepath, 'w') as f:
-                json.dump(state, f, indent=4)
+            
+            # Save entire state as single JSON object
+            db.set_state('market_structure', state)
+            
             return True
         except Exception as e:
-            logger.error(f"Error saving BotState: {e}")
+            logger.error(f"Error saving BotState to DB: {e}")
             return False
 
-    def load_state(self, filepath: str = "data/bot_state.json") -> bool:
-        """Load state from JSON file."""
-        if not os.path.exists(filepath):
-            return False
-            
+    def load_state(self) -> bool:
+        """Load state from database (v36.2)."""
         try:
-            with open(filepath, 'r') as f:
-                state = json.load(f)
+            db = get_db()
+            
+            state = db.get_state('market_structure')
+            if not state:
+                return False
             
             self.trend = TrendState(state.get('trend', 'RANGE'))
             self.structure_quality = state.get('structure_quality', 0)
             self.last_confirmed_high = state.get('last_confirmed_high', 0.0)
-            self.last_confirmed_low = state.get('last_confirmed_low', float('inf'))
+            self.last_confirmed_low = state.get('last_confirmed_low', 0.0)
             
             last_bos_time_str = state.get('last_bos_time')
             if last_bos_time_str:
@@ -327,10 +386,10 @@ class BotState:
             
             self.looking_for = state.get('looking_for')
             
-            logger.info(f"BotState loaded from {filepath}: {self.trend.value} | Quality: {self.structure_quality}")
+            logger.info(f"BotState loaded from DB: {self.trend.value} | Quality: {self.structure_quality}")
             return True
         except Exception as e:
-            logger.error(f"Error loading BotState: {e}")
+            logger.error(f"Error loading BotState from DB: {e}")
             return False
 
     def __repr__(self) -> str:

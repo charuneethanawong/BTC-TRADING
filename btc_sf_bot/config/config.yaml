@@ -39,7 +39,7 @@ iof:
   wall_threshold_ny: 300000     # $300K wall threshold for NY (v6.0: maintained)
   wall_max_distance_pct: 0.005  # Max wall distance: 0.5% of price (v6.0: maintained)
   # v28.2: Anti-spoofing — wall must be stable at least 15s (weekend: 7.5s)
-  min_wall_stability: 15
+  min_wall_stability: 8
   # v9.0: Wall threshold = median_vol_btc * price * multiplier
   # median_vol ~225 BTC → 225 * 70000 * 0.005 = $78,750 threshold
   wall_relative_size_multiplier: 0.0005  # v13.3: 0.05% ของ traded volume USD (จาก 0.5%)
@@ -194,7 +194,7 @@ institutional_flow:
   rejection_velocity_threshold: 0.5  # Min velocity for valid rejection (% per second)
 
 # ============================================================
-# MARKET REGIME (v27.1, v30.6 - BTC calibrated)
+# MARKET REGIME (v27.1, v30.6, v34.3 - BTC calibrated)
 # ============================================================
 market_regime:
   weakening_di_spread_max: 10.0    # DI spread < this = directional momentum fading
@@ -202,6 +202,8 @@ market_regime:
   # v30.6: BB width thresholds calibrated for BTC M5 (was using Forex defaults)
   bb_dead_threshold: 0.003         # BB width < 0.3% = truly dead (range < $200)
   bb_volatile_threshold: 0.015     # BB width > 1.5% = volatile (range > $1000)
+  # v34.3: CHOPPY regime - ADX <= 20 but BB > 0.8% (volatile but no clear trend)
+  bb_choppy_threshold: 0.008       # BB width > 0.8% = choppy (no clear trend direction)
 
 # ============================================================
 # ANALYSIS INTERVALS (v27.2 Smart Interval)
@@ -227,7 +229,7 @@ htf_mss:
   # H1 opposed: -2 pts, confidence 0.5x
   
   # Entry Filter
-  min_sync_score: -1                 # Minimum sync score to allow entry
+  min_sync_score: 0                 # Minimum sync score to allow entry
   filter_on_opposed_choch: true      # Block entries when H1 CHoCH opposes
 
 # ============================================================
@@ -237,7 +239,7 @@ trailing_stop:
   enabled: false      # EA now handles this independently
   
   # Activation
-  activation_profit_pct: 0.3         # Activate trailing after 0.3% profit
+  activation_profit_pct: 0.2
   
   # ATR-Based Trailing
   trail_atr_mult: 1.5                # ATR multiplier for trailing distance
@@ -309,10 +311,10 @@ bot_state:
 # SL/TP v6.1 CONFIGURATION (Session-adaptive ATR + Smart TP)
 # ============================================================
 sl:
-  ipa_base_mult: 1.0              # IPA: ATR × 1.0 (structural OB → less buffer)
+  ipa_base_mult: 1.3              # v43.0: 1.0→1.3 (higher MAE=$110 risk - stop hunt protection)
   iof_base_mult: 1.2              # IOF: ATR × 1.2 (wall → more buffer)
   min_atr: 0.8                    # Safety minimum: 0.8× ATR
-  max_atr: 1.5                    # Safety maximum: 1.5× ATR
+  max_atr: 1.8                    # v43.0: 1.5→1.8 (higher for IPA)
   absolute_min_sl_pct: 0.002     # v7.0 Bug#3: 0.2% of entry price (scales with BTC price)
   session_scale:                  # Session-adaptive multiplier
     ASIA: 0.85
@@ -325,7 +327,7 @@ tp:
   tp1_rr_min: 0.8                 # TP1 (BE trigger): nearest magnet with RR >= 0.8
   tp2_rr_min: 1.2                 # TP2 (actual TP): next magnet with RR >= 1.2
   tp1_atr_fallback: 1.2           # v9.2: TP1 ATR fallback (was 1.0 — ensures RR >= 1.2)
-  tp2_atr_fallback: 1.8           # v9.2: TP2 ATR fallback (was 1.5 — ensures RR >= 1.2)
+  tp2_atr_fallback: 2.0           # v43.0: 1.8→2.0 (higher for ABSORPTION big runner)
   move_sl_to_be: true             # EA moves SL to breakeven when TP1 reached
 
 # ============================================================
@@ -349,6 +351,7 @@ isf:
 # ============================================================
 smart_flow:
   enabled: false  # v8.1: Disabled — use IOF Analyzer for order flow signals
+  use_detectors: true  # v40.0: Enable 7-detector architecture (replaces 4-mode)
   atr_filter_enabled: true
   atr_volatility_scale_min: 0.8   # v6.0: was 0.7 (less aggressive in low vol)
   atr_volatility_scale_max: 1.1   # v6.0: was 1.3 (less aggressive in high vol)
@@ -399,6 +402,33 @@ smart_flow:
   cooldown_sweep: 0
   cooldown_wall: 0
   cooldown_zone: 0
+
+# ============================================================
+# v40.0: DETECTOR ARCHITECTURE (7 Signal Types)
+# ============================================================
+detectors:
+  momentum:
+    score_threshold: 9
+    der_min: 0.3
+    der_strong: 0.6
+  mean_revert:
+    score_threshold: 8
+    h1_dist_min: 2.0
+    wall_ratio_min: 5.0
+  absorption:
+    score_threshold: 9
+    der_strong: 0.6
+    price_move_max_atr: 0.5
+  ipa_ob:
+    score_threshold: 10
+    ob_body_min_pct: 0.0005
+    ob_max_distance_atr: 1.0
+  ipa_fvg:
+    score_threshold: 10
+  ipa_poc:
+    score_threshold: 10
+  ipa_ema:
+    score_threshold: 10
 
 # ============================================================
 # STOP LOSS / TAKE PROFIT - MODE SPECIFIC

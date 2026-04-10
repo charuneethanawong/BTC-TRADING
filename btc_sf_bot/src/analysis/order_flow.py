@@ -32,6 +32,9 @@ class OrderFlowAnalyzer:
         self.volume_threshold = self.config.get('volume_threshold', 1.5)
         self.inst_flow = InstitutionalFlowAnalyzer(self.config.get('institutional', {}))
         self.last_price_movement = 0.0
+        # v42.8: Data Gathering Buffers
+        self.imbalance_history = []  # List of recent imbalance ratios
+        self.wall_history = {}       # Price -> timestamp/seconds tracking
     
     @log_errors
     @timed_metric("OrderFlowAnalyzer.calculate_delta")
@@ -89,10 +92,14 @@ class OrderFlowAnalyzer:
         delta = 0
         
         for trade in trades:
-            if trade.get('is_buyer_maker', False):
-                delta -= float(trade['volume'])
+            # v42.2: Handle different trade formats (CCXT uses 'amount', not 'volume')
+            volume = trade.get('volume') or trade.get('amount') or 0
+            is_buyer_maker = trade.get('is_buyer_maker', False)
+            
+            if is_buyer_maker:
+                delta -= float(volume)
             else:
-                delta += float(trade['volume'])
+                delta += float(volume)
             cumulative.append(delta)
         
         return cumulative
@@ -101,24 +108,31 @@ class OrderFlowAnalyzer:
     @timed_metric("OrderFlowAnalyzer.calculate_imbalance")
     @retry(max_attempts=3, delay=0.1, backoff=2.0, exceptions=(Exception,))
     @circuit_breaker(failure_threshold=5, timeout=30.0, expected_exception=Exception)
-    def calculate_imbalance(self, bids: Dict[float, float], asks: Dict[float, float]) -> float:
-        """
-        Calculate order book imbalance.
-        
-        Args:
-            bids: Dictionary of bid prices and volumes
-            asks: Dictionary of ask prices and volumes
-        
-        Returns:
-            Imbalance ratio (bid_vol / ask_vol)
-        """
-        bid_vol = sum(bids.values())
-        ask_vol = sum(asks.values())
-        
-        if ask_vol == 0:
-            return 10.0  # Max bullish
-        
-        return bid_vol / ask_vol
+    def calculate_imbalance(self, bids, asks, levels: int = 20) -> float:
+        """v42.3: Expand to 20 levels for better stability."""
+        # Handle both formats
+        if isinstance(bids, dict):
+            bid_vols = list(bids.values())[:levels]
+        elif isinstance(bids, list):
+            bid_vols = [b[1] for b in bids[:levels] if len(b) >= 2]
+        else:
+            bid_vols = []
+
+        if isinstance(asks, dict):
+            ask_vols = list(asks.values())[:levels]
+        elif isinstance(asks, list):
+            ask_vols = [a[1] for a in asks[:levels] if len(a) >= 2]
+        else:
+            ask_vols = []
+
+        bid_vol = sum(bid_vols)
+        ask_vol = sum(ask_vols)
+
+        if ask_vol <= 0.001: # Avoid div by zero
+            return 20.0
+
+        ratio = bid_vol / ask_vol
+        return min(ratio, 20.0) # Lower cap for display stability
     
     def detect_cvd_divergence(
         self, 
@@ -401,8 +415,17 @@ class OrderFlowAnalyzer:
         Returns:
             Dictionary with order flow data
         """
+        # v42.2: Normalize bids/asks to dict format for compatibility
+        if isinstance(bids, list):
+            # List format: [[price, volume], ...]
+            bids_dict = {b[0]: b[1] for b in bids if len(b) >= 2}
+            asks_dict = {a[0]: a[1] for a in asks if len(a) >= 2}
+        else:
+            bids_dict = bids if bids else {}
+            asks_dict = asks if asks else {}
+        
         # Calculate values
-        imbalance = self.calculate_imbalance(bids, asks)
+        imbalance = self.calculate_imbalance(bids_dict, asks_dict)
         delta = self.calculate_delta(trades)
         
         # Calculate CVD Tilt (Slope of recent delta)
@@ -477,8 +500,8 @@ class OrderFlowAnalyzer:
             'total_volume': total_vol,
             'volume_ratio': volume_ratio,
             'price': price,
-            'bid_volume': sum(bids.values()),
-            'ask_volume': sum(asks.values()),
+            'bid_volume': sum(bids_dict.values()),
+            'ask_volume': sum(asks_dict.values()),
             'open_interest': open_interest,
             'oi_change': oi_change,
             'oi_change_pct': oi_change_pct,

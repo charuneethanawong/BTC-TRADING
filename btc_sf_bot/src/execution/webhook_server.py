@@ -20,6 +20,7 @@ env_path = Path(__file__).parent.parent.parent / "config" / ".env"
 load_dotenv(dotenv_path=env_path)
 
 from ..utils.logger import get_logger
+from ..data.db_manager import get_db
 
 import logging
 
@@ -113,7 +114,7 @@ dashboard_state: Dict = {
 
     # AI
     'ai': {
-        'enabled': True,
+        'enabled': False,
         'bias': 'NEUTRAL',
         'confidence': 0,
         'action': 'WAIT',
@@ -425,33 +426,18 @@ async def get_ai_status():
 
 @app.get("/api/trades/log")
 async def get_trade_log(limit: int = 50, exclude_skipped: bool = False):
-    """Get latest N records from ai_trade_log.jsonl.
+    """Get latest N trades from database (v36.2).
     exclude_skipped=true: filter out EA_SKIPPED for analysis page
     """
-    import json
-    from pathlib import Path
-
-    # v31.0: Fix path - bot writes to btc_sf_bot/data/, not src/data/
-    log_path = Path(__file__).resolve().parent.parent.parent / 'data' / 'ai_trade_log.jsonl'
-
-    if not log_path.exists():
-        return {'trades': []}
-
+    db = get_db()
+    trades = db.get_trades(limit=limit * 2)  # Fetch more to filter
+    
     records = []
-    try:
-        with open(log_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        r = json.loads(line.strip())
-                        if exclude_skipped and r.get('status') == 'EA_SKIPPED':
-                            continue
-                        records.append(r)
-                    except:
-                        pass
-    except Exception as e:
-        logger.error(f"Error reading trade log: {e}")
-
+    for trade in trades:
+        if exclude_skipped and trade.get('status') == 'EA_SKIPPED':
+            continue
+        records.append(trade)
+    
     return {'trades': records[-limit:]}
 
 
@@ -473,48 +459,35 @@ async def toggle_ai():
 
 @app.post("/api/trades/clear")
 async def clear_trade_log():
-    """v25.0: Clear ai_trade_log.jsonl — reset trade history."""
-    from pathlib import Path
-    log_path = Path(__file__).parent.parent / "data" / "ai_trade_log.jsonl"
+    """v50.5: Clear trades + operational tables. Preserves signal_telemetry + trade_outcomes."""
+    db = get_db()
     try:
-        with open(log_path, 'w') as f:
-            f.write('')
-        # Reset ai_stats in dashboard
+        with db._conn() as conn:
+            conn.execute('DELETE FROM trades')
+            conn.execute('DELETE FROM gate_blocks')
+            conn.execute('DELETE FROM regime_snapshots')
+            conn.execute('DELETE FROM ai_analysis')
+            conn.execute('DELETE FROM ai_skipped')
+            conn.execute('DELETE FROM bot_state')
+            # signal_telemetry: PRESERVED (permanent analysis warehouse)
+            # trade_outcomes: PRESERVED (permanent results store)
         dashboard_state['ai_stats'] = {
             'total': 0, 'wins': 0, 'losses': 0,
             'win_rate': 0, 'skipped': 0, 'opened': 0,
         }
-        logger.info("🗑️ Trade log cleared via Dashboard")
-        return {'status': 'ok', 'message': 'Trade log cleared'}
+        logger.info("Trades cleared — telemetry + outcomes preserved")
+        return {'status': 'ok', 'message': 'Trades cleared. Telemetry & outcomes preserved.'}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
 
 
 @app.post("/api/ai/analyze-trades")
 async def ai_analyze_trades(model: str = "deepseek"):
-    """v26.0: AI analyzes trade log. model=deepseek (API) or claude (local CLI)."""
-    import json, os
-    from pathlib import Path
-    from collections import Counter
-
-    log_path = Path(__file__).parent.parent / "data" / "ai_trade_log.jsonl"
-    if not log_path.exists():
-        return {'insight': 'No trade data available.'}
-
-    # Read trades
-    records = []
-    try:
-        with open(log_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        records.append(json.loads(line.strip()))
-                    except:
-                        pass
-    except:
-        return {'insight': 'Error reading trade log.'}
-
-    closed = [r for r in records if r.get('status') in ('WIN', 'LOSS')]
+    """v36.2: AI analyzes trade log from database."""
+    db = get_db()
+    trades = db.get_trades(limit=500)
+    
+    closed = [r for r in trades if r.get('status') in ('WIN', 'LOSS')]
     if len(closed) < 3:
         return {'insight': f'Not enough closed trades ({len(closed)}). Need at least 3.'}
 
@@ -693,7 +666,7 @@ Be brutally honest. Data-driven only. No filler.
             return {'insight': f'[Gemini CLI error: {e}]\n\nRaw stats:\n{summary}'}
 
     # === DEEPSEEK: Use OpenRouter API ===
-    openrouter_key = os.getenv('OPENROUTER_API_KEY', '')
+    openrouter_key = '' # os.getenv('OPENROUTER_API_KEY', '')
     if openrouter_key:
         try:
             from openai import AsyncOpenAI

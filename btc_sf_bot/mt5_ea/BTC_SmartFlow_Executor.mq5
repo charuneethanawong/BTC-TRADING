@@ -435,6 +435,7 @@ int CountPositionsByPattern(string patternType)
 // v4.9 M5: Count positions by mode (IPA or IOF) - from comment field
 // v12.7: Extract precise mode from comment to prevent IPA/IPA_FRVP collision
 // v15.8: Map new comment formats (IPAF_ → IPA_FRVP, IOFF_ → IOF_FRVP)
+// v72.1: Added REVERSAL handling
 string GetModeFromComment(string comment)
 {
    // v15.8: Check IPAF first (before IPA because IPAF starts with IPA)
@@ -446,11 +447,16 @@ string GetModeFromComment(string comment)
    // Check IOF after IOFF
    if(StringFind(comment, "IOF_") == 0) return "IOF";
    
+   // v72.1: Check REVERSAL modes
+   if(StringFind(comment, "REVERSAL_OB_") == 0) return "REVERSAL_OB";
+   if(StringFind(comment, "REVERSAL_OS_") == 0) return "REVERSAL_OS";
+   
    // Fallback: legacy comments
    if(StringFind(comment, "IPA_FRVP") >= 0) return "IPA_FRVP";
    if(StringFind(comment, "IOF_FRVP") >= 0) return "IOF_FRVP";
    if(StringFind(comment, "IPA") >= 0) return "IPA";
    if(StringFind(comment, "IOF") >= 0) return "IOF";
+   if(StringFind(comment, "REVERSAL") >= 0) return "REVERSAL";
    
    return "UNKNOWN";
 }
@@ -2290,7 +2296,7 @@ void ProcessSignal(string content)
     g_currentPatternType = mode;
     
      Print("🚀 OPENING POSITION [", mode, "]: ", direction, " | Lot: ", DoubleToString(lotSize, 3), " | @", DoubleToString(entryPrice, 2), " | Score:", score);
-     Print("   v6.1 TP Levels: TP1(BE)=", DoubleToString(g_tp1Level, 2), " | TP2=", DoubleToString(g_tp2Level, 2));
+     // v6.1 TP Levels removed per user request
      g_totalTrades++;
     
     // Update Last Trade State for Guards

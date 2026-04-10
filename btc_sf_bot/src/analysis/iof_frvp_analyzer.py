@@ -20,6 +20,7 @@ class IOFResult:
     IOF_FRVP Result — compatible with IOF IOFResult for signal_builder.build_iof().
     v11.2: signal_type has default value for compatibility.
     v15.9: Added reversal_mode and custom_magnets fields.
+    v34.6: Added m5_efficiency field.
     """
     direction: str
     score: int
@@ -41,6 +42,9 @@ class IOFResult:
     next_resistance: float
     next_support: float
     signal_type: str = 'MOMENTUM'  # v15.5: default 'MOMENTUM' (was 'IOF_FRVP')
+    # v34.6: Added efficiency tracking
+    m5_efficiency: float = 0.5
+    wall_scan: Dict = None
     # FRVP-specific
     frvp_data: Dict = None
     wall_at_hvn: bool = False
@@ -89,7 +93,7 @@ class IOFFRVPAnalyzer(IOFAnalyzer):
         self.lvn_tp_extend = iof_config.get('lvn_tp_extend', True)  # LVN breakout → extend TP
         
         # Override score threshold for IOF_FRVP
-        self.score_threshold = iof_config.get('score_threshold', 6)
+        self.score_threshold = iof_config.get('score_threshold', 8)
         
         self.logger.info(f"{self.log_prefix} IOF_FRVP Analyzer initialized | Threshold: {self.score_threshold}")
     

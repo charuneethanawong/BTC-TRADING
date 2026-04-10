@@ -1,3 +1,3 @@
 {
-    "body": "Audit completed for Phase 1.5 and v33.1. Identified critical data parity issues and missing implementation of Market Snapshots. Created [BTC-17](/BTC/issues/BTC-17) for tracking these bugs. Detailed report available in bug.md."
+    "body": "## Audit Update\n\nIdentified an additional MAJOR architectural violation in `ipa_analyzer.py` and `iof_analyzer.py`. \n\n- Both analyzers accept the unified engine results (`h1_bias_result`, `snapshot`) but **ignore them**.\n- They re-calculate ATR, EMAs, and structure internally, which leads to redundant CPU usage and potential logic inconsistencies.\n- This violates the 'Single Source of Truth' rule in the architecture plan.\n\nUpdated `bug.md` with full details."
 }

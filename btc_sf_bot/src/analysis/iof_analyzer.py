@@ -47,6 +47,7 @@ class IOFResult:
     """
     Result from IOF Analyzer.
     Returned when all 5 gates pass and score >= 11.
+    v39.1: Added momentum-specific analysis fields.
     """
     direction: str                   # 'LONG' or 'SHORT'
     score: int                       # 0-20
@@ -70,6 +71,17 @@ class IOFResult:
     signal_type: str = 'MOMENTUM'   # 'MOMENTUM' or 'ABSORPTION' (v9.6)
     reversal_mode: str = 'STRUCTURAL'  # v15.9: 'STRUCTURAL', 'STRONG_EXHAUST', 'EXHAUSTED', 'MODERATE'
     custom_magnets: Optional[Dict] = None  # v15.9: Custom magnets (e.g., EMA20_H1_REVERT)
+    
+    # v39.1: MOMENTUM-specific analysis fields
+    momentum_direction: str = ''     # 'LONG' or 'SHORT' - specific momentum direction
+    momentum_vs_regime: str = ''     # 'aligned' / 'contra' / 'neutral'
+    momentum_vs_m5: str = ''         # 'aligned' / 'contra' / 'neutral'
+    der_before_entry: float = 0.0    # DER value before entry (was it weak?)
+    ema_counter_before: bool = False # EMA9 counter before entry
+    pullback_depth: float = 0.0      # Retrace % of impulse (0-1)
+    impulse_strength: float = 0.0    # ER value (0-1)
+    wall_proximity: float = 0.0      # Distance to nearest wall (in ATR)
+    entry_timing: str = ''           # 'early' / 'mid' / 'late'
 
     def __str__(self) -> str:
         return (f"IOF {self.direction} | Score: {self.score}/20 | "
@@ -128,9 +140,9 @@ class IOFAnalyzer:
         self.funding_extreme: float = self.config.get('funding_extreme', 0.0005)  # 0.05%
 
         # === Score Threshold ===
-        # v6.0: Reduced from 9 to 6 to allow signals when OI/OB data unavailable
+        # v6.0: Reduced from 9 to 8 to allow signals when OI/OB data unavailable
         # (soft gates mean max possible score is reduced without data)
-        self.score_threshold: int = self.config.get('score_threshold', 6)
+        self.score_threshold: int = self.config.get('score_threshold', 8)
 
         # === RR Targets by Session ===
         self.rr_target_by_session = {
@@ -182,6 +194,22 @@ class IOFAnalyzer:
             if atr_m5 is not None:
                 self.atr_m5 = atr_m5
 
+            # v34.1: use unified engine results — inject into binance_data so all
+            # downstream private methods pick up the values without signature changes
+            if h1_bias_result is not None:
+                br = h1_bias_result
+                binance_data = dict(binance_data)  # shallow copy — don't mutate caller's dict
+                binance_data.setdefault('h1_bias', br.bias)           # v34.1: use unified engine result
+                binance_data.setdefault('ema9', br.ema9)               # v34.1: use unified engine result
+                binance_data.setdefault('ema20', br.ema20)             # v34.1: use unified engine result
+                binance_data.setdefault('ema50', br.ema50)             # v34.1: use unified engine result
+                # h1_ema_dist_pct: |price − EMA20| / EMA20 × 100
+                if br.ema20 > 0 and not binance_data.get('h1_ema_dist_pct'):
+                    binance_data['h1_ema_dist_pct'] = abs(current_price - br.ema20) / br.ema20 * 100  # v34.1: use unified engine result
+
+            if snapshot is not None:
+                self._snapshot = snapshot  # v34.1: store for use in _check_delta_absorption
+
             # === v14.1: Gate 1a — Scan walls both sides FIRST ===
             wall_scan = self._scan_walls_both_sides(binance_data, current_price, candles_m5)
 
@@ -194,18 +222,20 @@ class IOFAnalyzer:
             raw_direction = delta_result['direction']
             signal_type = delta_result['signal_type']  # v14.3: MOMENTUM/ABSORPTION/REVERSAL_OB/REVERSAL_OS/MEAN_REVERT
 
-            # === v29.1: M5 State Gate — SIDEWAY/CAUTION/Range Position Filter ===
-            m5_state = binance_data.get('m5_state', 'RANGING')
-            if m5_state == 'SIDEWAY':
-                self.logger.info(f"{self.log_prefix} M5 State Gate: {signal_type} blocked in SIDEWAY")
+            # === v39.2: M5 State Gate — Low ER Filter (not cached state) ===
+            # ใช้ ER โดยตรงจาก snapshot — ไม่พึ่ง cached M5 State ที่ค้าง 5 นาที
+            # ER < 0.15 = market ไม่ trend = block MOMENTUM
+            # เหตุผล: ACCUMULATION/SIDEWAY มี ER ต่ำ → MOMENTUM 0% WR
+            er_short = binance_data.get('m5_efficiency', 0.5)
+            if er_short < 0.15:
+                self.logger.info(
+                    f"{self.log_prefix} M5 State Gate: {signal_type} blocked — "
+                    f"ER too low ({er_short:.2f} < 0.15)"
+                )
                 return None
 
-            # C5: CAUTION state — MOMENTUM gets penalty -2 (must have strong DER+Wall to pass)
-            if m5_state == 'CAUTION' and signal_type == 'MOMENTUM':
-                self._caution_penalty = -2
-                self.logger.info(f"{self.log_prefix} M5 State Gate: CAUTION — MOMENTUM penalty -2")
-            else:
-                self._caution_penalty = 0
+            # v38.7: CAUTION merged into RANGING — no longer penalized separately
+            self._caution_penalty = 0
 
             # C1: Range Position Filter — block MOMENTUM at range extremes after SIDEWAY exit
             m5_range_high = binance_data.get('m5_range_high', 0)
@@ -295,25 +325,23 @@ class IOFAnalyzer:
                     self._reversal_mode = 'STRUCTURAL'
                 
                 elif signal_type == 'MEAN_REVERT':
-                    # MEAN_REVERT: ยังใช้ dist blocking เหมือนเดิม (ทั้ง IOF และ IOFF)
-                    if h1_dist < 1.2:
+                    # v39.2: MEAN_REVERT H1 threshold 0.8% → 2.0%
+                    # DB analysis: H1 < 2.0% = 100% LOSS (5/5 trades)
+                    if h1_dist < 2.0:
                         self.logger.info(
-                            f"{self.log_prefix} Gate 1d: BLOCKED | MEAN_REVERT H1 dist {h1_dist:.1f}% < 1.2%"
+                            f"{self.log_prefix} Gate 1d: BLOCKED | MEAN_REVERT H1 dist {h1_dist:.1f}% < 2.0% (v39.2)"
                         )
                         return None
                     
-                    if h1_dist >= 2.0:
-                        min_rev = 5
-                    elif h1_dist >= 1.5:
-                        min_rev = 6
-                    else:
-                        min_rev = 7
+                    # v37.7: MEAN_REVERT bypasses rev score check
+                    min_rev = 0
                     self._reversal_mode = 'STRUCTURAL'
                 
                 # เรียก rev_score จริง
                 rev_score = self._check_reversal_confirmation(candles_m5, binance_data, direction)
-                
-                if rev_score < min_rev:
+
+                # v37.7: Skip rev score check if min_rev == 0 (MEAN_REVERT bypass)
+                if min_rev > 0 and rev_score < min_rev:
                     mode_info = f" mode:{self._reversal_mode}" if hasattr(self, '_reversal_mode') else ""
                     self.logger.info(
                         f"{self.log_prefix} Gate 1d: FAILED | rev:{rev_score} < {min_rev}{mode_info}"
@@ -448,10 +476,12 @@ class IOFAnalyzer:
                 breakdown['entry_quality'] = iof_eqs
 
             # v26.0: Score threshold แยกตาม signal type
-            # REVERSAL_OS: 0W 2L → threshold 10 (ต้องมี confirmation สูงมาก)
+            # v34.8: MEAN_REVERT threshold 8 → 6 (wall ≥5x = high confidence)
             if signal_type == 'REVERSAL_OS':
                 effective_threshold = max(self.score_threshold, 10)
-            elif signal_type in ('MEAN_REVERT', 'REVERSAL_OB'):
+            elif signal_type == 'MEAN_REVERT':
+                effective_threshold = max(self.score_threshold, 6)  # was 8
+            elif signal_type == 'REVERSAL_OB':
                 effective_threshold = max(self.score_threshold, 8)
             else:
                 effective_threshold = self.score_threshold  # ปกติ 6
@@ -472,6 +502,64 @@ class IOFAnalyzer:
 
             # === RR Target ===
             rr_target = self.rr_target_by_session.get(session, 2.0)
+
+            # === v39.1: Calculate MOMENTUM-specific analysis fields ===
+            m5_state = binance_data.get('m5_state', 'RANGING')
+            regime = binance_data.get('regime', 'RANGING')
+            h1_bias = binance_data.get('h1_bias', 'NEUTRAL')
+            er_short = binance_data.get('m5_efficiency', 0.5)
+            er_long = binance_data.get('er_long', 0.5)
+            
+            # momentum_vs_regime: aligned if direction matches regime expectation
+            momentum_vs_regime = 'neutral'
+            if signal_type == 'MOMENTUM':
+                if regime in ('TRENDING', 'VOLATILE') and direction == 'LONG':
+                    momentum_vs_regime = 'aligned'
+                elif regime in ('TRENDING', 'VOLATILE') and direction == 'SHORT':
+                    momentum_vs_regime = 'contra'
+                elif regime in ('RANGING', 'CHOPPY'):
+                    momentum_vs_regime = 'contra'  # momentum in ranging = contra
+            
+            # momentum_vs_m5: aligned if M5 state supports momentum
+            momentum_vs_m5 = 'neutral'
+            if signal_type == 'MOMENTUM':
+                if m5_state in ('TRENDING', 'EXHAUSTION'):
+                    momentum_vs_m5 = 'aligned'
+                elif m5_state in ('ACCUMULATION', 'PULLBACK', 'RANGING'):
+                    momentum_vs_m5 = 'contra'
+            
+            # der_before_entry: DER value at signal time
+            der_before_entry = delta_result.get('der', 0.0)
+            
+            # ema_counter_before: is EMA9 counter to direction?
+            h1_ema9_dir = binance_data.get('h1_ema9_direction', 'NEUTRAL')
+            ema_counter_before = (
+                (direction == 'LONG' and h1_ema9_dir == 'BEARISH') or
+                (direction == 'SHORT' and h1_ema9_dir == 'BULLISH')
+            )
+            
+            # pullback_depth: retrace ratio from _check_iof_entry_quality
+            iof_eqs = getattr(self, '_iof_eqs', 0)
+            pullback_depth = getattr(self, '_pullback_depth', 0.0)
+            
+            # impulse_strength: ER value
+            impulse_strength = max(er_short, er_long)
+            
+            # wall_proximity: distance to wall in ATR
+            wall_price = wall_result.get('wall_price', 0)
+            current_price = self.current_price
+            if wall_price > 0 and self.atr_m5 > 0:
+                wall_proximity = abs(current_price - wall_price) / self.atr_m5
+            else:
+                wall_proximity = 0.0
+            
+            # entry_timing: based on pullback depth
+            if pullback_depth < 0.2:
+                entry_timing = 'early'  # entered very early in pullback
+            elif pullback_depth < 0.5:
+                entry_timing = 'mid'   # entered mid-pullback
+            else:
+                entry_timing = 'late'  # entered late (deep pullback)
 
             result = IOFResult(
                 direction=direction,
@@ -496,6 +584,16 @@ class IOFAnalyzer:
                 signal_type=delta_result['signal_type'],  # v9.6: MOMENTUM or ABSORPTION
                 reversal_mode=getattr(self, '_reversal_mode', 'STRUCTURAL'),  # v15.9
                 custom_magnets=None,  # v15.9: Standard IOF doesn't use custom magnets
+                # v39.1: MOMENTUM-specific analysis fields
+                momentum_direction=direction,
+                momentum_vs_regime=momentum_vs_regime,
+                momentum_vs_m5=momentum_vs_m5,
+                der_before_entry=der_before_entry,
+                ema_counter_before=ema_counter_before,
+                pullback_depth=pullback_depth,
+                impulse_strength=impulse_strength,
+                wall_proximity=wall_proximity,
+                entry_timing=entry_timing,
             )
 
             self.logger.debug(f"{self.log_prefix} Analysis result: {result}")
@@ -520,9 +618,16 @@ class IOFAnalyzer:
         if len(candles_m5) < 4:
             return None
 
-        # Calculate ATR and current price
-        atr = self._calc_atr(candles_m5, 14)
         current_close = float(candles_m5.iloc[-1]['close'])
+
+        # v34.1: use unified engine result for ATR when snapshot is available
+        _snapshot = getattr(self, '_snapshot', None)
+        if _snapshot is not None and getattr(_snapshot, 'atr_m5', 0) > 0:
+            atr = _snapshot.atr_m5  # v34.1: use unified engine result
+        elif hasattr(self, 'atr_m5') and self.atr_m5 > 0:
+            atr = self.atr_m5  # already set from atr_m5 param in analyze()
+        else:
+            atr = self._calc_atr(candles_m5, 14)
 
         # Effective ATR Clamping
         effective_atr = max(atr, current_close * 0.0005)
@@ -572,25 +677,79 @@ class IOFAnalyzer:
                       (raw_direction == 'SHORT' and price_move_signed < 0)
         momentum_strength = der * price_move_atr if der_aligned else 0.0
 
-        # v25.0: Pre-check MEAN_REVERT conditions (wall + H1 dist)
-        # ถ้า wall strong + H1 dist สูง → MEAN_REVERT มีสิทธิ์ก่อน REVERSAL
-        # v26.0: MEAN_REVERT — ลด threshold ให้เหมาะกับ BTC (เดิมยากเกินไม่เคย trigger)
+        # v34.9: MEAN_REVERT v2 — use price vs EMA to determine direction
+        # h1_dist is absolute value, so use direct price comparison
         is_mean_revert_candidate = False
-        if wall_scan and wall_scan.get('raw_ratio', 0) >= 2.0:
+        mr_wall_dir = None
+        if wall_scan and wall_scan.get('raw_ratio', 0) >= 5.0:
             mr_wall_ratio = wall_scan['raw_ratio']
-            mr_min_dist = 0.8 if mr_wall_ratio >= 10 else 1.0 if mr_wall_ratio >= 5 else 1.2
-            if h1_dist >= mr_min_dist:
-                mr_wall_dir = 'LONG' if wall_scan['raw_dominant'] == 'BID' else 'SHORT'
-                is_mean_revert_candidate = (
-                    (mr_wall_dir == 'LONG' and h1_bias == 'BEARISH') or
-                    (mr_wall_dir == 'SHORT' and h1_bias == 'BULLISH')
-                )
+            mr_wall_dom = wall_scan.get('raw_dominant', 'NONE')
+            
+            # v34.9: Use price vs EMA20 to determine if overextended up or down
+            if h1_dist >= 0.8:
+                ema20_val = binance_data.get('ema20', 0)
+                # v35.5 FIX: Get current_price from binance_data
+                price_val = binance_data.get('current_price', 0) if binance_data.get('current_price') else 0
+                price_above_ema = price_val > ema20_val if ema20_val > 0 and price_val > 0 else False
+                
+                # ราคาอยู่สูงกว่า EMA + ASK wall กั้น → SHORT (revert ลง)
+                if price_above_ema and mr_wall_dom == 'ASK':
+                    is_mean_revert_candidate = True
+                    mr_wall_dir = 'SHORT'
+                # ราคาอยู่ต่ำกว่า EMA + BID wall กั้น → LONG (revert ขึ้น)
+                elif not price_above_ema and mr_wall_dom == 'BID':
+                    is_mean_revert_candidate = True
+                    mr_wall_dir = 'LONG'
 
         # ==============================================
-        # 1. ABSORPTION (เฉพาะสุด — เช็คก่อน)
-        #    DER ≥ 0.6 + price flat < 0.5 ATR
+        # 1. MEAN_REVERT v39.2 — checked BEFORE ABSORPTION
+        #    v39.2 FIX: H1 threshold 0.8% → 2.0% (DB: <2.0% = 100% LOSS)
+        #    v39.2 FIX: Block in CHOPPY regime (DB: -5.68% avg)
+        #    v39.2 FIX: When M5=TRENDING, prefer MOMENTUM
+        #    Price overextended + big wall (≥5x) protecting = revert to mean
         # ==============================================
-        if der >= self.der_strong and price_move_atr < 0.5:
+        # v34.8: MEAN_REVERT checked BEFORE ABSORPTION (not dependent on M5 OB/OS)
+        # v39.2 FIX: Use separate flag to track if MEAN_REVERT was BLOCKED (not just rejected)
+        # v39.2 FIX: Initialize signal_type to None so it can be checked in all branches
+        signal_type = None
+        mean_revert_blocked = False
+        if is_mean_revert_candidate:
+            # v39.2: H1 threshold 2.0% minimum
+            if h1_dist < 2.0:
+                self.logger.info(
+                    f"{self.log_prefix} Gate 1b: MEAN_REVERT v34.8 BLOCKED | "
+                    f"H1:{h1_dist:.1f}% < 2.0% (v39.2) — fallback to other signal types"
+                )
+                mean_revert_blocked = True
+            else:
+                # v39.2: Block in CHOPPY regime
+                regime = binance_data.get('regime', 'RANGING')
+                m5_state = binance_data.get('m5_state', 'RANGING')
+                if regime == 'CHOPPY':
+                    self.logger.info(
+                        f"{self.log_prefix} Gate 1b: MEAN_REVERT v34.8 BLOCKED | "
+                        f"CHOPPY regime (avg -5.68% in CHOPPY)"
+                    )
+                    mean_revert_blocked = True
+                # v39.2: When M5=TRENDING + strong DER, prefer MOMENTUM
+                elif m5_state == 'TRENDING' and der >= self.der_strong:
+                    self.logger.info(
+                        f"{self.log_prefix} Gate 1b: MEAN_REVERT v34.8 → MOMENTUM preferred | "
+                        f"M5=TRENDING + DER:{der:.3f} (MOMENTUM avg +2.20% vs MEAN_REVERT -4.94%)"
+                    )
+                    mean_revert_blocked = True
+                else:
+                    direction = mr_wall_dir
+                    signal_type = 'MEAN_REVERT'
+                    self.logger.info(
+                        f"{self.log_prefix} Gate 1b: MEAN_REVERT v34.8 | "
+                        f"H1:{h1_dist:.1f}% Wall:{mr_wall_dom} ratio:{mr_wall_ratio:.1f}x → {direction}"
+                    )
+
+        # ==============================================
+        # 2. ABSORPTION (DER ≥ 0.6 + price flat < 0.5 ATR)
+        # ==============================================
+        if signal_type is None and der >= self.der_strong and price_move_atr < 0.5:
             direction = 'SHORT' if cumulative_delta > 0 else 'LONG'
             signal_type = 'ABSORPTION'
             self.logger.info(
@@ -599,21 +758,10 @@ class IOFAnalyzer:
             )
 
         # ==============================================
-        # 2. REVERSAL (M5 OB/OS — DER เท่าไหร่ก็ได้)
+        # 3. REVERSAL (M5 OB/OS — DER เท่าไหร่ก็ได้)
         # v17.1: Momentum Strength (DER * PriceMove/ATR) ≥ 0.5 → MOMENTUM (safety filter)
         # ==============================================
-        # v25.0: MEAN_REVERT takes priority over REVERSAL when wall+dist qualify
-        elif is_mean_revert_candidate and (m5_overbought or m5_oversold):
-            direction = mr_wall_dir
-            signal_type = 'MEAN_REVERT'
-            self.logger.info(
-                f"{self.log_prefix} Gate 1b: MEAN_REVERT | "
-                f"H1:{h1_dist:.1f}% (min:{mr_min_dist}%) "
-                f"Wall:{wall_scan['raw_dominant']} ratio:{mr_wall_ratio:.1f}x "
-                f"M5:{'OB' if m5_overbought else 'OS'} DER:{der:.3f} → {direction}"
-            )
-
-        elif m5_overbought:
+        if signal_type is None and m5_overbought:
             if momentum_strength >= 0.5 and raw_direction == 'LONG' and not self._keep_reversal_on_momentum:
                 # IOF: Momentum strong LONG + M5 OB = momentum still strong → don't reverse
                 if der >= self.der_min:
@@ -633,7 +781,7 @@ class IOFAnalyzer:
                     f"{self.log_prefix} Gate 1b: REVERSAL_OB | M5 OB Momentum:{momentum_strength:.2f} DER:{der:.3f}({raw_direction}) → SHORT"
                 )
 
-        elif m5_oversold:
+        if signal_type is None and m5_oversold:
             if momentum_strength >= 0.5 and raw_direction == 'SHORT' and not self._keep_reversal_on_momentum:
                 # IOF: Momentum strong SHORT + M5 OS = momentum still strong → don't reverse
                 if der >= self.der_min:
@@ -653,27 +801,66 @@ class IOFAnalyzer:
                 )
 
         # ==============================================
-        # 3. MEAN_REVERT (H1 dist + wall — DER เท่าไหร่ก็ได้)
+        # 3. MEAN_REVERT v39.2 (H1 dist + wall — DER เท่าไหร่ก็ได้)
+        #    v39.2 FIX: H1 threshold 0.8% → 2.0% (DB analysis: <2.0% = 100% LOSS)
+        #    v39.2 FIX: Block in CHOPPY regime (DB: CHOPPY+TRENDING = -5.68% avg)
+        #    v39.2 FIX: When M5=TRENDING, prefer MOMENTUM over MEAN_REVERT
         # ==============================================
-        elif (wall_scan and wall_scan['raw_ratio'] >= 2.0):
+        if signal_type is None and (wall_scan and wall_scan['raw_ratio'] >= 2.0):
             wall_ratio = wall_scan['raw_ratio']
-            min_dist = 0.8 if wall_ratio >= 10 else 1.0 if wall_ratio >= 5 else 1.2
+            # v39.2: H1 threshold 2.0% minimum (was 0.8-1.2%)
+            # DB analysis: H1 < 2.0% = 5W/0L, H1 > 2.0% = 2W/0L
+            min_dist = 2.0 if wall_ratio >= 10 else 2.2 if wall_ratio >= 5 else 2.5
 
-            if h1_dist >= min_dist:
+            # v39.2: Block MEAN_REVERT in CHOPPY regime
+            regime = binance_data.get('regime', 'RANGING')
+            m5_state = binance_data.get('m5_state', 'RANGING')
+            if regime == 'CHOPPY':
+                self.logger.info(
+                    f"{self.log_prefix} Gate 1b: MEAN_REVERT BLOCKED | "
+                    f"CHOPPY regime (avg -5.68% in CHOPPY)"
+                )
+                # Fallback to MOMENTUM if DER sufficient
+                if der >= self.der_min:
+                    direction = raw_direction
+                    signal_type = 'MOMENTUM'
+                    if direction == 'LONG' and ema_distance > max_ema_dist:
+                        return None
+                    elif direction == 'SHORT' and ema_distance < -max_ema_dist:
+                        return None
+                    self.logger.info(
+                        f"{self.log_prefix} Gate 1b: MOMENTUM (CHOPPY override) | DER:{der:.3f} → {direction}"
+                    )
+                else:
+                    self.logger.info(
+                        f"{self.log_prefix} Gate 1: FAILED | CHOPPY + DER:{der:.3f}<{self.der_min}"
+                    )
+                    return None
+            elif h1_dist >= min_dist:
                 wall_dir = 'LONG' if wall_scan['raw_dominant'] == 'BID' else 'SHORT'
                 is_revert = (
                     (wall_dir == 'LONG' and h1_bias == 'BEARISH') or
                     (wall_dir == 'SHORT' and h1_bias == 'BULLISH')
                 )
                 if is_revert:
-                    direction = wall_dir
-                    signal_type = 'MEAN_REVERT'
-                    self.logger.info(
-                        f"{self.log_prefix} Gate 1b: MEAN_REVERT | "
-                        f"H1:{h1_dist:.1f}% (min:{min_dist}%) "
-                        f"Wall:{wall_scan['raw_dominant']} ratio:{wall_ratio:.1f}x "
-                        f"DER:{der:.3f} → {direction}"
-                    )
+                    # v39.2: When M5=TRENDING, prefer MOMENTUM over MEAN_REVERT
+                    # DB analysis: MOMENTUM in TRENDING = +2.20% avg, MEAN_REVERT = -4.94%
+                    if m5_state == 'TRENDING' and der >= self.der_strong:
+                        self.logger.info(
+                            f"{self.log_prefix} Gate 1b: MOMENTUM preferred over MEAN_REVERT | "
+                            f"M5=TRENDING + DER:{der:.3f} (MOMENTUM avg +2.20% vs MEAN_REVERT -4.94%)"
+                        )
+                        direction = raw_direction
+                        signal_type = 'MOMENTUM'
+                    else:
+                        direction = wall_dir
+                        signal_type = 'MEAN_REVERT'
+                        self.logger.info(
+                            f"{self.log_prefix} Gate 1b: MEAN_REVERT | "
+                            f"H1:{h1_dist:.1f}% (min:{min_dist}%) "
+                            f"Wall:{wall_scan['raw_dominant']} ratio:{wall_ratio:.1f}x "
+                            f"DER:{der:.3f} → {direction}"
+                        )
                 else:
                     # wall ตาม trend → fallback MOMENTUM (ถ้า DER ≥ 0.3)
                     if der >= self.der_min:
@@ -699,7 +886,10 @@ class IOFAnalyzer:
                         return None
                     elif direction == 'SHORT' and ema_distance < -max_ema_dist:
                         return None
-                    self.logger.info(f"{self.log_prefix} Gate 1b: MOMENTUM (fallback) | DER:{der:.3f} → {direction}")
+                    self.logger.info(
+                        f"{self.log_prefix} Gate 1b: MOMENTUM (H1 dist too low for MEAN_REVERT) | "
+                        f"H1:{h1_dist:.1f}% < {min_dist}% → DER:{der:.3f} → {direction}"
+                    )
                 else:
                     self.logger.info(
                         f"{self.log_prefix} Gate 1: FAILED | "
@@ -710,7 +900,7 @@ class IOFAnalyzer:
         # ==============================================
         # 4. MOMENTUM (catch-all — DER ≥ 0.3)
         # ==============================================
-        elif der >= self.der_min:
+        if signal_type is None and der >= self.der_min:
             direction = raw_direction
             signal_type = 'MOMENTUM'
             # EMA exhaustion check
@@ -725,7 +915,7 @@ class IOFAnalyzer:
         # ==============================================
         # 5. FAIL
         # ==============================================
-        else:
+        if signal_type is None:
             reasons = [f"DER:{der:.3f}<{self.der_min}"]
             if not (m5_overbought or m5_oversold): reasons.append("no OB/OS")
             self.logger.info(f"{self.log_prefix} Gate 1: FAILED | {' | '.join(reasons)}")
@@ -742,13 +932,8 @@ class IOFAnalyzer:
         pb_status = pullback.get('status', 'NONE')
         pb_quality = pullback.get('quality', {})
         
-        # Block False Pullback entries against trend
-        if pb_status == 'ACTIVE' and not pb_quality.get('is_true', False):
-            h1_bias = binance_data.get('h1_bias', 'NEUTRAL')
-            # If LONG during bearish false pullback OR SHORT during bullish false pullback -> Block
-            if (direction == 'LONG' and h1_bias == 'BEARISH') or (direction == 'SHORT' and h1_bias == 'BULLISH'):
-                self.logger.info(f"{self.log_prefix} Gate 1: FAILED | False Pullback Trap (dir:{direction} vs bias:{h1_bias})")
-                return None
+        # v37.8: False Pullback Trap removed — H1 bias ไม่ใช่ปัจจัยที่ทำให้ MOMENTUM win/loss
+        # Wall + DER gates (G8, v36.8, G13) จัดการ direction filtering แทน
                 
         # Limit TP for True Pullback counter-trend entries (handled in TP calc, but we can log it here)
         tp_note = ""
@@ -1108,6 +1293,13 @@ class IOFAnalyzer:
             score += 1
             breakdown['rejection'] = 1
 
+        # v38.4: DER Direction Contra Penalty — DER points against signal direction
+        der_dir = delta_result.get('der_direction', '')
+        direction = delta_result.get('direction', 'NEUTRAL')
+        if der_dir and der_dir != direction and der > 0:
+            score -= 2
+            breakdown['der_dir_contra'] = -2
+
         # v15.2: H1 EMA9 Direction — เฉพาะ MOMENTUM/ABSORPTION
         # REVERSAL/MEAN_REVERT สวน trend เสมอ → skip (ไม่โดน -2 ฟรี)
         if signal_type in ('MOMENTUM', 'ABSORPTION'):
@@ -1319,12 +1511,12 @@ class IOFAnalyzer:
             if signal_type == 'MOMENTUM':
                 score += 1
                 breakdown['m5_pullback_momentum'] = 1
-        elif m5_state == 'CAUTION':
-            # v29.1 C5: H1 NEUTRAL + gray zone — penalty for MOMENTUM
-            caution_pen = getattr(self, '_caution_penalty', 0)
-            if caution_pen != 0:
-                score += caution_pen
-                breakdown['m5_caution'] = caution_pen
+        elif m5_state == 'RECOVERY':
+            # v38.7: RECOVERY = post-pullback consolidation with trend intent
+            if signal_type == 'MOMENTUM':
+                score += 1
+                breakdown['m5_recovery_momentum'] = 1
+                breakdown['m5_caution'] = self._caution_penalty  # v40.1: fix undefined var
                 self._caution_penalty = 0
             else:
                 score -= 1
@@ -1413,6 +1605,9 @@ class IOFAnalyzer:
             retrace = current_price - low_after
 
         retrace_ratio = retrace / impulse if impulse > 0 else 0
+
+        # v39.1: Store pullback_depth for analysis
+        self._pullback_depth = retrace_ratio
 
         r_log = ""
         if retrace_ratio >= 0.5:
@@ -1805,15 +2000,23 @@ class IOFAnalyzer:
             return der_direction, +1, 'ALIGNED'
 
         elif v_ratio >= 3.0:
-            # v14.8: WALL OVERRIDE เฉพาะ DER ไม่แรง (< 0.5)
-            if self._current_der < 0.5:
+            # v36.8: Tiered WALL OVERRIDE
+            if v_ratio >= 5.0:
+                # Wall ≥ 5x → wall ชนะเสมอ (MOMENTUM 0W/4L when wall ≥ 5x contra)
+                self.logger.info(
+                    f"{self.log_prefix} Gate 1c: WALL_OVERRIDE_STRONG | "
+                    f"DER:{der_direction} vs Wall:{wall_dir} (ratio:{v_ratio:.1f}x, DER:{self._current_der:.3f}) → {wall_dir}"
+                )
+                return wall_dir, 0, 'WALL_OVERRIDE_STRONG'
+            elif self._current_der < 0.8:
+                # Wall 3-5x + DER < 0.8 → wall ชนะ
                 self.logger.info(
                     f"{self.log_prefix} Gate 1c: WALL OVERRIDE | "
                     f"DER:{der_direction} vs Wall:{wall_dir} (ratio:{v_ratio:.1f}x, DER:{self._current_der:.3f}) → {wall_dir}"
                 )
                 return wall_dir, 0, 'WALL_OVERRIDE'
             else:
-                # DER แรงเกินให้ wall ชนะ → ใช้ DER แต่ penalty
+                # Wall 3-5x + DER ≥ 0.8 → DER ชนะแต่ penalty
                 self.logger.info(
                     f"{self.log_prefix} Gate 1c: CONFLICT_DER_STRONG | "
                     f"DER:{der_direction} vs Wall:{wall_dir} (ratio:{v_ratio:.1f}x, DER:{self._current_der:.3f}) → DER with penalty"

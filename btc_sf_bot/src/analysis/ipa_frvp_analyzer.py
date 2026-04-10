@@ -49,6 +49,10 @@ class IPAResult:
     h1_fvg_boundary: Optional[float] = None
     session: str = 'LONDON'
     score_breakdown: Dict = field(default_factory=dict)
+    # v35.2: Added m5_efficiency field
+    m5_efficiency: float = 0.5
+    # v36.2: Added wall_scan field
+    wall_scan: Dict = field(default_factory=dict)
     # v11.2: FRVP-specific fields
     frvp_data: Dict = None
     ob_at_hvn: bool = False
@@ -219,7 +223,8 @@ class IPAFRVPAnalyzer(IPAAnalyzer):
                 ema_pullback=ema_pullback, equal_levels=equal_levels,
                 session_level=session_level, volume_ok=volume_ok,
                 frvp_data=frvp_data, pullback_ended=pullback_ended,
-                score_adjust=score_adjust
+                score_adjust=score_adjust,
+                m5_state=snapshot.m5_state if snapshot else 'RANGING',  # v38.4
             )
 
             if score < self.score_threshold:
@@ -499,7 +504,8 @@ class IPAFRVPAnalyzer(IPAAnalyzer):
                               session_level: bool,
                               volume_ok: bool, frvp_data: Dict,
                               pullback_ended: bool = False,
-                              score_adjust: int = 0) -> int:
+                              score_adjust: int = 0,
+                              m5_state: str = 'RANGING') -> int:
         """
         Calculate IPA_FRVP score (max 20 points).
 
@@ -526,8 +532,13 @@ class IPAFRVPAnalyzer(IPAAnalyzer):
             self._last_score_breakdown['m5_bos'] = 2
         
         if h1_result.get('choch'):
-            score += 4
-            self._last_score_breakdown['h1_choch'] = 4
+            # v38.4: Reduce h1_choch weight in RANGING/CHOPPY — false signals
+            if m5_state in ('RANGING', 'CHOPPY', 'SIDEWAY', 'RECOVERY'):
+                score += 2
+                self._last_score_breakdown['h1_choch'] = 2
+            else:
+                score += 4
+                self._last_score_breakdown['h1_choch'] = 4
         elif h1_result.get('bos'):
             score += 3
             self._last_score_breakdown['h1_bos'] = 3

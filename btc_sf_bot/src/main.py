@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
 
@@ -18,6 +19,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.data.connector import BinanceConnector
 from src.data.cache import MarketCache
+from src.data.db_manager import get_db
 from src.data.binance_fetcher import BinanceDataFetcher as BinanceFetcher
 from src.analysis.ict import ICTAnalyzer
 from src.analysis.order_flow import OrderFlowAnalyzer
@@ -30,13 +32,24 @@ from src.analysis.pullback_detector import PullbackDetector
 from src.analysis.frvp import MultiLayerVolumeProfile
 from src.analysis.ipa_analyzer import IPAAnalyzer
 from src.analysis.iof_analyzer import IOFAnalyzer
-from src.analysis.ipa_frvp_analyzer import IPAFRVPAnalyzer as IPAFAnalyzer
-from src.analysis.iof_frvp_analyzer import IOFFRVPAnalyzer as IOFFAnalyzer
+# v40.0: IPAF/IOFF replaced by detector architecture (ipa_fvg, ipa_ema, etc.)
+# from src.analysis.ipa_frvp_analyzer import IPAFRVPAnalyzer as IPAFAnalyzer
+# from src.analysis.iof_frvp_analyzer import IOFFRVPAnalyzer as IOFFAnalyzer
+
+# v40.3: New detector architecture (9 types including REVERSAL)
+from src.detectors import (
+    MomentumDetector, MeanRevertDetector, AbsorptionDetector,
+    ReversalOBDetector, ReversalOSDetector,
+    IPADetector,  # v51.0: unified IPA (was IPAOBDetector, IPAFVGDetector, IPAEMADetector)
+    VPBounceDetector, VPBreakoutDetector, VPAbsorbDetector, VPRevertDetector, VPPOCDetector,
+    DetectionContext, ALL_DETECTORS,
+)
 from src.signals.sl_tp_calculator import InstitutionalSLTPCalculator as SLTPCalculator, SLTPRESult
 from src.signals.signal_builder import SignalBuilder
 from src.signals.signal_gate import SignalGate
 from src.execution.telegram_alert import TelegramAlert as TelegramNotifier
 from src.risk.position_sizer import RiskManager
+from src.risk.trailing_stop_manager import TrailingStopManager
 from src.signals.signal_gate import PositionInfo, AccountState
 from src.utils.logger import setup_logger
 from src.utils.terminal_display import get_display
@@ -71,14 +84,21 @@ class BTCSFBot:
             self.config = config_obj.dict()
         else:
             self.config = config_obj
-            
+        
+        # v36.0: Database manager
+        from src.data.db_manager import get_db
+        self.db = get_db()
+        self._reconcile_with_mt5()  # v50.7: Sync with MT5 on startup
+        self._last_snapshot_time = None
+        self._last_regime = None  # v52.0: For regime change detection
+        
         # Initialize components
         self.connector = BinanceConnector(self.config)
         self.cache = MarketCache()
         self.ict = ICTAnalyzer()
         self.order_flow = OrderFlowAnalyzer()
         self.volume_profile = VolumeProfileAnalyzer()
-        self.regime_detector = RegimeDetector()
+        self.regime_detector = RegimeDetector(self.config.get('market_regime', {}))
         
         # v27.0: Unified Data Layer
         self.h1_bias_engine = H1BiasEngine(self.config)
@@ -93,10 +113,37 @@ class BTCSFBot:
         # YAML sub-section so config.get('score_threshold') resolves correctly.
         self.ipa_analyzer = IPAAnalyzer(self.config.get('ipa', {}))
         self.iof_analyzer = IOFAnalyzer(self.config.get('iof', {}))
-        # FRVP subclasses receive the full config so their __init__ can extract
-        # both the 'ipa_frvp'/'iof_frvp' sub-section AND pass 'ipa'/'iof' to super().
-        self.ipaf_analyzer = IPAFAnalyzer(self.config)
-        self.ioff_analyzer = IOFFAnalyzer(self.config)
+        # v40.0: IPAF/IOFF replaced by detector architecture
+        # self.ipaf_analyzer = IPAFAnalyzer(self.config)
+        # self.ioff_analyzer = IOFFAnalyzer(self.config)
+        self.ipaf_analyzer = None
+        self.ioff_analyzer = None
+        
+        # v40.3: New detector architecture (9 types)
+        self.use_detectors = self.config.get('smart_flow', {}).get('use_detectors', False)
+        self.detectors = []
+        if self.use_detectors:
+            detector_config = self.config.get('detectors', {})
+            self.detectors = [
+                # Order Flow (every 60s)
+                MomentumDetector(detector_config.get('momentum', {})),
+                MeanRevertDetector(detector_config.get('mean_revert', {})),
+                AbsorptionDetector(detector_config.get('absorption', {})),
+                ReversalOBDetector(detector_config.get('reversal', {})),
+                ReversalOSDetector(detector_config.get('reversal', {})),
+                # Price Action (candle close)
+                # v51.0: MOD-38 - unified IPA (was IPAOBDetector, IPAFVGDetector, IPAEMADetector)
+                IPADetector(self.config.get('ipa', {})),
+                # VP (candle close) — v43.7
+                VPBounceDetector(detector_config.get('vp', {})),
+                VPBreakoutDetector(detector_config.get('vp', {})),
+                VPAbsorbDetector(detector_config.get('vp', {})),
+                VPRevertDetector(detector_config.get('vp', {})),
+                VPPOCDetector(detector_config.get('vp', {})),
+            ]
+            logger.info(f"[v43.7] Detector architecture enabled ({len(self.detectors)} detectors)")
+        else:
+            logger.info("[v40.3] Using legacy 4-mode architecture (set use_detectors: true to switch)")
         
         # v18.7: AI Pre-Trade Analyzer (Level 1) - OpenRouter
         from src.analysis.ai_analyzer import AIMarketAnalyzer
@@ -104,7 +151,7 @@ class BTCSFBot:
             'openrouter_api_key': os.getenv('OPENROUTER_API_KEY', ''),
             'ai_model': 'deepseek/deepseek-v3.2',  # DeepSeek V3.2 — ใหม่สุด $0.26/$0.38 per 1M
             'call_interval': 300,  # 5 minutes
-            'ai_enabled': True,
+            'ai_enabled': False,
         }
         self.ai_analyzer = AIMarketAnalyzer(ai_config)
         self.ai_analyzer._ipa_ref = self.ipa_analyzer  # v25.0: AI reads M5 structure from IPA
@@ -116,7 +163,10 @@ class BTCSFBot:
         self.sl_tp_calc = SLTPCalculator(self.config)
         self.signal_builder = SignalBuilder()
         self.signal_gate = SignalGate(self.config)
-        self.risk_manager = RiskManager(self.config)
+        # RiskManager disabled - only EA handles risk
+        # self.risk_manager = RiskManager(self.config)
+        self.risk_manager = None
+        self.trailing_manager = TrailingStopManager(self.config)
         self.binance_fetcher = BinanceFetcher(
             symbol=self.config.get('exchange.symbol', 'BTCUSDT'),
             testnet=self.config.get('exchange.testnet', False)
@@ -150,6 +200,7 @@ class BTCSFBot:
         self._last_ioff_result = None  # v24.1: For dashboard
         self._last_sent_signal = None  # v24.1: For dashboard
         self._last_h1_bias = None
+        self._last_terminal_update = 0
         self._cached_regime = None  # v27.0: Cached regime for single source of truth
         self._wall_tracking = {}
         self.wall_history_cache = []
@@ -158,6 +209,9 @@ class BTCSFBot:
         # v24.0: Dashboard tracking
         self.cycle_count = 0
         self.start_time = datetime.now(timezone.utc)
+        
+        # v48.0: MOD-21 BUG-6 — Post-close Delta Alignment tracking
+        self.pending_delta_signals = []
         
         # v18.5: Terminal Display
         self.terminal = get_display()
@@ -178,14 +232,14 @@ class BTCSFBot:
         self.ws_handler.register_callback('trade', self.on_trade)
         self.ws_handler.register_callback('order_book', self.on_order_book)
         
-        # Initialize Risk Manager
-        try:
-            if hasattr(self.risk_manager, 'initialize') and callable(getattr(self.risk_manager, 'initialize')):
-                if not self.risk_manager.initialize():
-                    logger.warning("Risk Manager initialization returned False, continuing anyway")
-        except Exception as e:
-            logger.warning(f"Risk Manager initialization failed: {e}, continuing anyway")
-            
+        # Initialize Risk Manager (disabled - only EA handles risk)
+        # try:
+        #     if hasattr(self.risk_manager, 'initialize') and callable(getattr(self.risk_manager, 'initialize')):
+        #         if not self.risk_manager.initialize():
+        #             logger.warning("Risk Manager initialization returned False, continuing anyway")
+        # except Exception as e:
+        #     logger.warning(f"Risk Manager initialization failed: {e}, continuing anyway")
+             
         logger.info("Initialization complete")
         return True
 
@@ -215,6 +269,7 @@ class BTCSFBot:
         v27.2: Smart Interval
         - Regime + H1 Bias + Snapshot + Terminal + IOF/IOFF: ทุก 15 วินาที
         - IPA/IPAF: เมื่อ M5 candle ปิดใหม่ (new_candle=True)
+        v43.8: Smart Silent Display - 60s interval unless signal
 
         Returns:
             True if a signal was generated, False otherwise.
@@ -222,365 +277,26 @@ class BTCSFBot:
         session = self.session_detector.get_current_session()
         magnets = self.ict.get_active_magnets(candles_m5, current_price)
 
-        # v28.1: Cache for AI signal evaluation (snapshot at signal time)
+        # v28.1: Cache for AI signal evaluation
         self._last_binance_data = binance_data
         self._last_candles_h1 = candles_h1
         self._last_candles_m5 = candles_m5
         self._last_data_timestamp = time.time()
 
-        # v27.0: Calculate regime ONCE (single source of truth)
         regime = self.regime_detector.detect(candles_m5, candles_h1)
-        self._cached_regime = regime  # Cache for reuse
-        
-        # v27.0: Set ADX in binance_data (single source of truth)
+        self._cached_regime = regime
         binance_data['adx_h1'] = regime.adx_h1 if regime else 25.0
+        binance_data['regime_confidence'] = 'HIGH'
 
-        # Pullback Context (v13.0)
-        # v13.7 FIX: Pass h1_bias from cached IPA result
         h1_bias_pb = getattr(self, '_last_h1_bias', None) or 'NEUTRAL'
-        
         pullback_info = self.pullback_detector.analyze(
-            candles_m5=candles_m5,
-            candles_h1=candles_h1,
-            h1_bias=h1_bias_pb,
-            current_price=current_price
+            candles_m5=candles_m5, candles_h1=candles_h1,
+            h1_bias=h1_bias_pb, current_price=current_price
         )
-        
         binance_data['pullback'] = pullback_info
 
-        # === v28.2: MarketSnapshot FIRST (M5 data needed by H1BiasEngine) ===
-        snapshot = self.snapshot_builder.build(
-            candles_m5=candles_m5,
-            candles_h1=candles_h1,
-            binance_data=binance_data,
-            regime_result=regime,
-            current_price=current_price,
-        )
-
-        # v28.2: Propagate M5 data for H1BiasEngine M5 Reality Check
-        # v30.7: Added der_sustainability
-        binance_data['m5_state'] = snapshot.m5_state
-        binance_data['m5_ema_position'] = snapshot.m5_ema_position
-        binance_data['m5_efficiency'] = snapshot.m5_efficiency
-        binance_data['atr_m5'] = snapshot.atr_m5
-        binance_data['der'] = snapshot.der
-        binance_data['der_direction'] = snapshot.der_direction
-        binance_data['der_persistence'] = snapshot.der_persistence
-        binance_data['der_sustainability'] = snapshot.der_sustainability
-        binance_data['delta'] = snapshot.delta
-
-        # === H1BiasEngine (now uses M5 data from snapshot) ===
-        h1_bias_result = self.h1_bias_engine.analyze(
-            candles_h1=candles_h1,
-            candles_m5=candles_m5,
-            binance_data=binance_data,
-            regime=regime.regime,
-        )
-
-        # v29.1: 2-pass M5 State refinement with H1 context (C4, C5)
-        snapshot = self.snapshot_builder.refine_m5_state(snapshot, candles_m5, h1_bias_result.bias)
-        binance_data['m5_state'] = snapshot.m5_state
-
-        # Propagate bias to binance_data
-        binance_data['h1_bias'] = h1_bias_result.bias
-        binance_data['h1_candle_bias'] = h1_bias_result.lc
-        binance_data['lr_bias'] = h1_bias_result.lr
-        binance_data['lr_count'] = h1_bias_result.lr_count
-        binance_data['h1_ema9_direction'] = h1_bias_result.l2
-        binance_data['h1_bias_result'] = h1_bias_result
-        binance_data['regime_result'] = regime
-
-        self._last_h1_bias = h1_bias_result.bias
-        self._last_h1_bias_result = h1_bias_result  # v29.1: cache for dashboard
-        
-        # Propagate to binance_data for backward compatibility with IOF
-        binance_data['order_flow_summary'] = {
-            'delta': snapshot.delta,
-            'der': snapshot.der,
-            'cvd_delta': snapshot.cvd,
-            'total_volume': snapshot.total_volume,
-            'buy_volume': snapshot.buy_volume,
-            'sell_volume': snapshot.sell_volume,
-            'imbalance': snapshot.imbalance,
-            'imbalance_direction': snapshot.imbalance_direction,
-            'oi_change_pct': snapshot.oi_change_pct,
-        }
-        
-        binance_data['snapshot'] = snapshot  # v27.2: AI reads DER persistence + sustainability
-        # Cache ATR for analyzers
-        binance_data['atr_m5'] = snapshot.atr_m5
-        
-        # v28.0: Propagate M5 state for gate logic
-        binance_data['m5_state'] = snapshot.m5_state
-        binance_data['m5_efficiency'] = snapshot.m5_efficiency
-        
-        # v18.6: Terminal Display Full Integration
-        cycle_start = time.time() if cycle_start_time is None else cycle_start_time
-
-        # === 1. Header ===
-        self.terminal.header(current_price, session, regime.regime, datetime.now().strftime('%Y-%m-%d %H:%M'))
-
-        # === 2. AI Section ===
-        ai_result = binance_data.get('ai_analysis')
-        # v27.3: ถ้าไม่มี result ใหม่ ใช้ cached + แสดง age
-        if not ai_result:
-            ai_result = getattr(self, '_last_ai_result', None)
-        ai_age = None
-        if ai_result and ai_result.get('timestamp'):
-            try:
-                ai_time = datetime.fromisoformat(ai_result['timestamp'])
-                ai_age = int((datetime.now(timezone.utc) - ai_time).total_seconds())
-            except (ValueError, TypeError):
-                pass
-        self.terminal.ai_section(ai_result, age_seconds=ai_age)
-
-        # === 3. Market Context ===
-        wall_scan = binance_data.get('wall_scan', {})
-        wall_dom = wall_scan.get('raw_dominant', 'NONE') if wall_scan else 'NONE'
-        wall_ratio = wall_scan.get('raw_ratio', 1) if wall_scan else 1
-        
-        # v27.0: Display MARKET using h1_bias_result EMAs (single source of truth)
-        # Note: EMAs now come from H1BiasEngine, not calculated here
-        
-        
-        
-        
-        
-        # v27.0: Display MARKET using Result Objects (single source of truth)
-        # v30.5: Add chart pattern description for context
-        self.terminal.market_context(
-            regime=regime,              # RegimeResult object
-            h1_bias_result=h1_bias_result,  # H1BiasResult object
-            snapshot=snapshot,         # MarketSnapshot object
-            h1_dist=binance_data.get('h1_ema_dist_pct', 0),
-            pullback_status=pullback_info['status'],
-            wall_info=f"Wall: {wall_dom} {wall_ratio:.1f}x",
-            news_context=binance_data.get('news_context', 'none'),  # v27.3
-            # v30.5: trend context
-            # v30.5: trend context
-        )
-        
-        # === 4. Mode 1: IPA ===
-        self.terminal.mode_header('IPA', 1)
-
-        def _flush():
-            """Flush ALL logger handlers — walk entire logger tree."""
-            manager = logging.Logger.manager
-            for name in list(manager.loggerDict.keys()):
-                lgr = logging.getLogger(name)
-                for h in lgr.handlers:
-                    h.flush()
-            # Also flush root logger
-            for h in logging.getLogger().handlers:
-                h.flush()
-
-        # === IPA Mode ===
-        # === v27.2: IPA runs only on M5 candle close ===
-        # === v28.0: M5 State Gate - block SIDEWAY/ACCUMULATION ===
-        m5_state = snapshot.m5_state
-        ipa_signal_sent = False
-        ipa_result = None
-        if regime.is_ipa_suitable and new_candle and m5_state not in ('SIDEWAY', 'ACCUMULATION'):
-            # v28.0: M5 State Gate passed
-            logger.info(f"[IPA] M5 State Gate: {m5_state} - allowed")
-            # v27.0: Pass atr_m5 and h1_bias_result (single source of truth)
-            ipa_result = self.ipa_analyzer.analyze(
-                 candles_m5=candles_m5,
-                 candles_h1=candles_h1,
-                 current_price=current_price,
-                 session=session,
-                 magnets=magnets,  # v10.0: for IPA Gate 4 confirmations
-                 binance_data=binance_data,  # v13.0: Pullback integration
-                 atr_m5=snapshot.atr_m5,  # v33.0
-                 h1_bias_result=h1_bias_result,  # v33.0
-                 snapshot=snapshot,  # v33.0
-             )
-            self._last_ipa_result = ipa_result  # Cache for dashboard
-            # v12.6: Cache h1_bias for IOF/IOFF reversal confirmation
-            # v27.1: h1_bias managed by H1BiasEngine (line 235) — no need to cache/clear here
-            # v27.1: IPA_FAILED skip log removed — IPA failing gate is normal, not a "skip"
-
-            # v18.6: Terminal gate summary for IPA
-            if ipa_result:
-                self.terminal.gate('Score:', True, f'{ipa_result.score}/{self.ipa_analyzer.score_threshold} {ipa_result.direction} | {ipa_result.score_breakdown}')
-                logger.info(f"[IPA] Signal ready | Score:{ipa_result.score} | Dir:{ipa_result.direction} | Entry:{current_price:.1f}")
-
-                # Calculate SL/TP (v6.1: pass magnets for smart TP)
-                sl_tp = self.sl_tp_calc.calculate_ipa(
-                    entry_price=current_price,  # v14.0: Use current price instead of stale entry
-                    direction=ipa_result.direction,
-                    ob_high=ipa_result.ob_high,
-                    ob_low=ipa_result.ob_low,
-                    atr_m5=ipa_result.atr_m5,
-                    swing_highs=ipa_result.swing_highs,
-                    swing_lows=ipa_result.swing_lows,
-                    pdh=ipa_result.pdh,
-                    pdl=ipa_result.pdl,
-                    h1_fvg_boundary=ipa_result.h1_fvg_boundary,
-                    magnets=magnets,
-                )
-
-                if sl_tp:
-                    logger.info(f"[IPA] SL/TP | Entry:{ipa_result.entry_price:.1f} | SL:{sl_tp.stop_loss:.1f} | TP:{sl_tp.take_profit:.1f} | RR:{sl_tp.actual_rr:.2f}")
-
-                    # Build signal
-                    signal = self.signal_builder.build_ipa(
-                        ipa_result=ipa_result,
-                        sl_tp=sl_tp,
-                        session=session,
-                        regime=regime.regime,
-                    )
-
-                    # Build account state for gate
-                    account = self._get_account_state()
-                    positions = self._get_active_positions()
-
-                    # Gate check
-                    gate_result = self.signal_gate.check(signal, account, positions)
-                    if gate_result.passed:
-                        self.signal_gate.mark_sent(signal)
-                        await self._send_signal(signal)
-                        ipa_signal_sent = True
-                        logger.info(f"[IPA] Sending signal | ID:{signal.get('signal_id')} | Dir:{signal.get('direction')} | Entry:{signal.get('entry_price')} | SL:{signal.get('stop_loss')} | TP:{signal.get('take_profit')} | RR:{signal.get('required_rr')}")
-                    else:
-                        logger.info(f"[IPA] Gate blocked: {gate_result.reason}")
-                else:
-                    logger.info(f"[IPA] SL/TP failed | Entry:{ipa_result.entry_price:.1f}")
-
-        # v18.5: Mode Header
-        self.terminal.mode_header('IOF', 2)
-        # === IOF Mode === (v11.0: Independent from IPA — each mode decides on its own)
-        # v13.7 FIX (BUG 01): Update binance_data['h1_bias'] with latest IPA result before IOF runs
-        binance_data['h1_bias'] = self._last_h1_bias
-        
-        # v14.8 FIX (BUG 01): H1 EMA9 direction — Independent Mode
-        # IOF ต้องได้รับข้อมูลเทรน H1 ตลอด ไม่ขึ้นกับ IPA result
-        h1_data = binance_data.get('h1_candles')
-        if h1_data is not None and len(h1_data) >= 20:
-            ema9 = h1_data['close'].ewm(span=9).mean().iloc[-1]
-            ema20 = h1_data['close'].ewm(span=20).mean().iloc[-1]
-            if ema9 > ema20:
-                binance_data['h1_ema9_direction'] = 'BULLISH'
-            elif ema9 < ema20:
-                binance_data['h1_ema9_direction'] = 'BEARISH'
-            else:
-                binance_data['h1_ema9_direction'] = 'NEUTRAL'
-        else:
-            binance_data['h1_ema9_direction'] = 'NEUTRAL'
-        
-        iof_signal_sent = False
-        if regime.is_iof_suitable:
-            # v27.0: Pass atr_m5 and h1_bias_result (single source of truth)
-            iof_result = self.iof_analyzer.analyze(
-                 candles_m5=candles_m5,
-                 binance_data=binance_data,
-                 current_price=current_price,
-                 session=session,
-                 atr_m5=snapshot.atr_m5,  # v33.0
-                 h1_bias_result=h1_bias_result,  # v33.0
-                 snapshot=snapshot,  # v33.0
-             )
-            self._last_iof_result = iof_result  # Cache for dashboard
-
-            # v9.6: Cross-Validation IPA ↔ IOF
-            # Block IOF if: IPA has strong bias + IOF direction conflicts + IOF is MOMENTUM
-            if iof_result and ipa_result and ipa_result.h1_bias in ('BULLISH', 'BEARISH'):
-                ipa_dir = 'LONG' if ipa_result.h1_bias == 'BULLISH' else 'SHORT'
-                iof_dir = iof_result.direction
-                iof_type = getattr(iof_result, 'signal_type', 'MOMENTUM')
-                
-                if iof_dir != ipa_dir and iof_type == 'MOMENTUM':
-                    logger.info(f"[IOF] Cross-validation blocked: IOF {iof_dir} vs IPA {ipa_result.h1_bias} ({iof_type})")
-                    return False
-
-            if iof_result:
-                # v12.0: Analyzer กรอง score threshold แล้ว — ไม่ต้องเช็ค >= 6 ซ้ำ
-                logger.info(f"[IOF] Signal ready | Score:{iof_result.score} | Dir:{iof_result.direction} | Wall:{iof_result.wall_price:.1f}")
-
-                # Calculate SL/TP (v6.1: pass magnets for smart TP)
-                # v7.0: entry_price = current_price (not wall_price) per Section 3.1
-                # SL = ATR-based distance from current entry, not from wall
-                # v15.9: Use custom_magnets if available
-                iof_magnets = iof_result.custom_magnets if iof_result.custom_magnets else magnets
-                sl_tp = self.sl_tp_calc.calculate_iof(
-                    entry_price=current_price,       # v7.0: entry = current broker price
-                    direction=iof_result.direction,
-                    wall_price=iof_result.wall_price,
-                    atr_m5=iof_result.atr_m5,
-                    session=session,
-                    next_resistance=iof_result.next_resistance,
-                    next_support=iof_result.next_support,
-                    magnets=iof_magnets,
-                )
-
-                if not sl_tp:
-                    logger.info(f"[IOF] SL/TP failed | Entry:{current_price} | Wall:{iof_result.wall_price:.1f}")
-                else:
-                    logger.info(f"[IOF] SL/TP | Entry:{current_price} | Wall:{iof_result.wall_price:.1f} | SL:{sl_tp.stop_loss} | TP:{sl_tp.take_profit} | RR:{sl_tp.actual_rr:.2f} | Dist:{sl_tp.sl_distance:.1f}")
-
-                if sl_tp:
-                    # v6.0: Validate entry-SL distance before building signal
-                    # For SHORT: SL must be ABOVE entry (entry < SL)
-                    # For LONG: SL must be BELOW entry (entry > SL)
-                    min_sl_distance_pct = 0.001  # 0.1% minimum SL distance
-                    min_sl_distance = current_price * min_sl_distance_pct
-                    
-                    if iof_result.direction == 'SHORT':
-                        sl_ok = sl_tp.stop_loss > iof_result.wall_price + min_sl_distance
-                        sl_distance = sl_tp.stop_loss - iof_result.wall_price
-                    else:
-                        sl_ok = sl_tp.stop_loss < iof_result.wall_price - min_sl_distance
-                        sl_distance = iof_result.wall_price - sl_tp.stop_loss
-                    
-                    if not sl_ok:
-                        logger.info(f"[IOF] Entry-SL too tight | Entry:{iof_result.wall_price} SL:{sl_tp.stop_loss} Dist:{sl_distance:.1f} Min:{min_sl_distance:.1f}")
-                        return False
-                    
-                    logger.debug(f"[IOF] Entry-SL validated | Entry:{iof_result.wall_price} SL:{sl_tp.stop_loss} Dist:{sl_distance:.1f}")
-                    
-                    # Build signal
-                    signal = self.signal_builder.build_iof(
-                        iof_result=iof_result,
-                        sl_tp=sl_tp,
-                        session=session,
-                        entry_price=current_price,  # v8.1 C1/C2: must match SL/TP calc entry
-                        regime=regime.regime,
-                    )
-
-                    # Build account state for gate
-                    account = self._get_account_state()
-                    positions = self._get_active_positions()
-
-                    # Gate check
-                    gate_result = self.signal_gate.check(signal, account, positions)
-                    if gate_result.passed:
-                        # v6.0: Log signal details before sending
-                        logger.info(f"[IOF] Sending signal | ID:{signal.get('signal_id')} | Dir:{signal.get('direction')} | Entry:{signal.get('entry_price')} | SL:{signal.get('stop_loss')} | TP:{signal.get('take_profit')} | RR:{signal.get('required_rr')}")
-                        self.signal_gate.mark_sent(signal)
-                        await self._send_signal(signal)
-                        iof_signal_sent = True
-                        logger.info(f"[IOF] Signal sent: {signal['signal_id']}")
-                    else:
-                        # v6.0: Log gate block reason at INFO level
-                        logger.info(f"[IOF] Gate blocked: {gate_result.reason}")
-                        
-                        # v19.0: Log skipped signal for IOF
-                        ai_result = getattr(self, '_last_ai_result', None)
-                        if ai_result and hasattr(self, 'ai_analyzer'):
-                            self.ai_analyzer.log_skipped_signal(
-                                mode='IOF',
-                                direction=iof_result.direction,
-                                gate_blocked=gate_result.reason,
-                                ai_analysis=ai_result,
-                                score=iof_result.score
-                            )
-
-        # v31.1: Send heartbeat to EA after IOF analysis (prevents timeout)
-        self._send_heartbeat()
-
-        # v11.0: Run FRVP modes (independent of IPA/IOF)
-        # Calculate FRVP once for both modes
-        # v20.0: Get H1 swing times for MultiLayerVolumeProfile
+        # === v43.7: FRVP Engine FIRST ===
+        # v43.8: Send all H1 swings + ATR for major swing filter
         h1_swings = {'last_swing_high_time': None, 'last_swing_low_time': None}
         if candles_h1 is not None and len(candles_h1) >= 10:
             h1_fractals = self.ict._get_fractals(candles_h1, n=5)
@@ -588,331 +304,431 @@ class BTCSFBot:
                 h1_swings['last_swing_high_time'] = h1_fractals['highs'][-1].get('time')
             if h1_fractals.get('lows'):
                 h1_swings['last_swing_low_time'] = h1_fractals['lows'][-1].get('time')
+            # v43.8: All swings + ATR for major swing detection
+            h1_swings['all_highs'] = h1_fractals.get('highs', [])
+            h1_swings['all_lows'] = h1_fractals.get('lows', [])
+            h1_swings['atr_h1'] = self.snapshot_builder._calc_atr(candles_h1, 14)
         
-        frvp_data = self.frvp_engine.calculate(candles_m5, h1_swings)
-        self._last_frvp_data = frvp_data  # v25.0: store for dashboard
-        
-        if frvp_data:
-            composite = frvp_data.get('composite', {})
-            logger.debug(f"[FRVP] Composite POC:{composite.get('poc', 0):.0f} | VAH:{composite.get('vah', 0):.0f} | VAL:{composite.get('val', 0):.0f}")
-            # v20.0: Also log confluence zones
-            confluence = frvp_data.get('confluence_zones', [])
-            if confluence:
-                logger.debug(f"[FRVP] Confluence zones: {confluence[:3]}")
+        ict_sweep = self.ict.get_last_sweep(candles_m5, current_price)
+        frvp_data = self.frvp_engine.calculate(candles_m5, h1_swings, ict_data={'last_sweep': ict_sweep}, h1_candles=candles_h1)
+        self.frvp_engine.commit_poc_state(frvp_data.get('layers', {}))
+        self._last_frvp_data = frvp_data
+        binance_data['frvp_data'] = frvp_data
 
-        _flush()  # Flush Mode 2 logs before Mode 3
-        # v27.2: IPAF runs only on M5 candle close (same as IPA)
-        self.terminal.mode_header('IPAF', 3)
-        ipaf_sent = False
-        if frvp_data and new_candle:
-            ipaf_sent = await self._run_ipa_frvp_analysis(
-                candles_m5, candles_h1, current_price, binance_data, frvp_data, snapshot, regime
-            )
-            # v31.1: Send heartbeat to EA after IPAF analysis (prevents timeout)
-            self._send_heartbeat()
+        # === MarketSnapshot ===
+        snapshot = self.snapshot_builder.build(
+            candles_m5=candles_m5, candles_h1=candles_h1,
+            binance_data=binance_data, regime_result=regime,
+            current_price=current_price
+        )
 
-        _flush()  # Flush Mode 3 logs before Mode 4
-        # v27.2: IOFF runs every 15s (same as IOF)
-        self.terminal.mode_header('IOFF', 4)
-        ioff_sent = False
-        if frvp_data:
-            ioff_sent = await self._run_iof_frvp_analysis(
-                candles_m5, current_price, binance_data, frvp_data, snapshot, regime
-            )
-            # v31.1: Send heartbeat to EA after IOFF analysis (prevents timeout)
-            self._send_heartbeat()
+        # Propagate data
+        binance_data['m5_state'] = snapshot.m5_state
+        binance_data['m5_ema_position'] = snapshot.m5_ema_position
+        binance_data['m5_efficiency'] = snapshot.m5_efficiency
+        binance_data['m5_dist_pct'] = snapshot.m5_dist_pct
+        binance_data['atr_m5'] = snapshot.atr_m5
+        binance_data['der'] = snapshot.der
+        binance_data['der_direction'] = snapshot.der_direction
+        binance_data['der_persistence'] = snapshot.der_persistence
+        binance_data['der_sustainability'] = snapshot.der_sustainability
+        binance_data['delta'] = snapshot.delta
+        binance_data['m5_bias'] = snapshot.m5_bias
+        binance_data['m5_bias_level'] = snapshot.m5_bias_level
+        binance_data['m5_swing_structure'] = snapshot.m5_swing_structure
+        binance_data['m5_swing_ema_overextended'] = snapshot.m5_swing_ema_overextended
+        binance_data['m5_swing_reversal_hint'] = snapshot.m5_swing_reversal_hint
+        binance_data['h1_swing_structure'] = snapshot.h1_swing_structure
+        binance_data['h1_swing_ema_overextended'] = snapshot.h1_swing_ema_overextended
+        binance_data['h1_swing_reversal_hint'] = snapshot.h1_swing_reversal_hint
 
-        _flush()  # Flush Mode 4 logs before returning
-        
-        # v18.6: Terminal Footer
-        cycle_time = time.time() - (cycle_start_time if cycle_start_time else time.time())
-        signals = []
-        if ipa_signal_sent: signals.append('IPA')
-        if iof_signal_sent: signals.append('IOF')
-        if ipaf_sent: signals.append('IPAF')
-        if ioff_sent: signals.append('IOFF')
-        
-        # v19.0: Get AI trade summary for footer
-        ai_stats = None
-        if hasattr(self, 'ai_analyzer'):
-            ai_stats = self.ai_analyzer.get_trade_summary()
-            
-        self.terminal.footer(signals_sent=signals, cycle_time=cycle_time, ai_stats=ai_stats)
+        # H1 Bias
+        h1_bias_result = self.h1_bias_engine.analyze(
+            candles_h1=candles_h1, candles_m5=candles_m5,
+            binance_data=binance_data, regime=regime.regime,
+        )
 
-        
-        # Flush stdout to ensure footer is printed
-        sys.stdout.flush()
-        
-        return ipa_signal_sent or iof_signal_sent or ipaf_sent or ioff_sent
+        # Refine M5 State
+        snapshot = self.snapshot_builder.refine_m5_state(snapshot, candles_m5, h1_bias_result.bias)
+        binance_data['m5_state'] = snapshot.m5_state
+        binance_data['m5_bias'] = snapshot.m5_bias
+        binance_data['m5_bias_level'] = snapshot.m5_bias_level
+        binance_data['m5_swing_structure'] = snapshot.m5_swing_structure
+        binance_data['m5_swing_ema_overextended'] = snapshot.m5_swing_ema_overextended
+        binance_data['m5_swing_reversal_hint'] = snapshot.m5_swing_reversal_hint
+        binance_data['h1_swing_structure'] = snapshot.h1_swing_structure
+        binance_data['h1_swing_ema_overextended'] = snapshot.h1_swing_ema_overextended
+        binance_data['h1_swing_reversal_hint'] = snapshot.h1_swing_reversal_hint
 
-    async def _run_ipa_frvp_analysis(self,
-                                     candles_m5: pd.DataFrame,
-                                     candles_h1: pd.DataFrame,
-                                     current_price: float,
-                                     binance_data: dict,
-                                     frvp_data: dict,
-                                     snapshot,
-                                     regime) -> bool:
-        """
-        v11.0: Run IPA_FRVP analyzer.
-        Combines IPA (OB/FVG/Structure) with FRVP (POC/VAH/VAL/HVN).
-        v27.0: Added snapshot and regime parameters (single source of truth).
-        """
-        session = self.session_detector.get_current_session()
-        magnets = self.ict.get_active_magnets(candles_m5, current_price)
-        # v27.0: Use passed regime, don't recalculate
-        
-        if not regime.is_ipa_suitable:
-            return False
-        
-        # v28.0: M5 State Gate - block SIDEWAY/ACCUMULATION for IPAF
-        m5_state = binance_data.get('m5_state', 'RANGING')
-        if m5_state in ('SIDEWAY', 'ACCUMULATION'):
-            logger.info(f"[IPAF] M5 State Gate: blocked {m5_state}")
-            return False
-        
-        # v27.0: Pass atr_m5 from snapshot
-        ipaf_result = self.ipaf_analyzer.analyze(
-            candles_m5=candles_m5,
-            candles_h1=candles_h1,
-            current_price=current_price,
-            session=session,
-            magnets=magnets,
-            frvp_data=frvp_data,
+        # Update confidence
+        confidence = self.regime_detector._calc_regime_confidence(regime.regime, snapshot.m5_state)
+        regime.regime_confidence = confidence
+        binance_data['regime_confidence'] = confidence
+        self._cached_regime = regime
+
+        # v51.2: Create ctx earlier so pending delta signals can use it
+        ctx = DetectionContext(
+            candles_m5=candles_m5, candles_h1=candles_h1,
+            current_price=current_price, snapshot=snapshot,
+            regime=regime, h1_bias=h1_bias_result,
+            session=session, magnets=magnets,
+            frvp_data=frvp_data, new_candle=new_candle,
             binance_data=binance_data,
-            atr_m5=snapshot.atr_m5, snapshot=snapshot,  # v33.0
         )
-        
-        if ipaf_result is None:
-            return False
-        
-        # v24.1: Store for dashboard
-        self._last_ipaf_result = ipaf_result
-        
-        # v12.0: Signal ready log
-        logger.info(f"[IPAF] Signal ready | Score:{ipaf_result.score} | Dir:{ipaf_result.direction} | Entry:{(ipaf_result.entry_zone_min + ipaf_result.entry_zone_max) / 2:.1f}")
-        
-        # Calculate SL/TP
-        sl_tp = self.sl_tp_calc.calculate_ipa(
-            entry_price=current_price,  # v14.0: Use current price instead of stale entry zone
-            direction=ipaf_result.direction,
-            ob_high=ipaf_result.ob_high,
-            ob_low=ipaf_result.ob_low,
-            atr_m5=ipaf_result.atr_m5,
-            swing_highs=ipaf_result.swing_highs,
-            swing_lows=ipaf_result.swing_lows,
-            pdh=ipaf_result.pdh,
-            pdl=ipaf_result.pdl,
-            h1_fvg_boundary=ipaf_result.h1_fvg_boundary,
-            magnets=magnets,
-        )
-        
-        # v26.0: IPAF SL floor $300 (SL<$300 = 54%WR vs SL>=$300 = 82%WR)
-        if sl_tp:
-            sl_dist = abs(current_price - sl_tp.stop_loss)
-            if sl_dist < 300:
-                if ipaf_result.direction == 'LONG':
-                    new_sl = round(current_price - 300, 2)
-                else:
-                    new_sl = round(current_price + 300, 2)
-                logger.info(f"[IPAF] SL floor: ${sl_dist:.0f} -> $300")
-                sl_tp = SLTPRESult(
-                    stop_loss=new_sl,
-                    take_profit=sl_tp.take_profit,
-                    sl_distance=300.0,
-                    sl_pct=sl_tp.sl_pct,
-                    actual_rr=sl_tp.actual_rr,
-                    required_rr=sl_tp.required_rr,
-                    tp1_level=sl_tp.tp1_level,
-                    tp2_level=sl_tp.tp2_level,
-                    sl_reason=sl_tp.sl_reason + '_FLOOR300',
-                    tp1_reason=sl_tp.tp1_reason,
-                    tp2_reason=sl_tp.tp2_reason
-                )
 
-        # v26.0: IPAF NY TP cap — SL×2.0 (NY avg TP $1205 ไม่ถึง)
-        if sl_tp:
-            ipaf_ses = self.session_detector.get_current_session()
-            sl_dist = abs(current_price - sl_tp.stop_loss)
-            tp_dist = abs(sl_tp.take_profit - current_price)
-            if ipaf_ses in ('NY',) and tp_dist > sl_dist * 2.0:
-                new_tp_dist = sl_dist * 2.0
-                if ipaf_result.direction == 'LONG':
-                    new_tp = round(current_price + new_tp_dist, 2)
-                else:
-                    new_tp = round(current_price - new_tp_dist, 2)
-                new_rr = round(new_tp_dist / max(sl_dist, 1), 2)
-                logger.info(f"[IPAF] NY TP cap: ${tp_dist:.0f} -> ${new_tp_dist:.0f}")
-                sl_tp = SLTPRESult(
-                    stop_loss=sl_tp.stop_loss,
-                    take_profit=new_tp,
-                    sl_distance=sl_tp.sl_distance,
-                    sl_pct=sl_tp.sl_pct,
-                    actual_rr=new_rr,
-                    required_rr=sl_tp.required_rr,
-                    tp1_level=sl_tp.tp1_level,
-                    tp2_level=new_tp,
-                    sl_reason=sl_tp.sl_reason,
-                    tp1_reason=sl_tp.tp1_reason,
-                    tp2_reason=sl_tp.tp2_reason
-                )
+        # v48.0: MOD-21 BUG-6 — Handle Pending Delta Signals in REAL-TIME
+        if self.pending_delta_signals:
+            await self._handle_pending_delta_signals(ctx)
 
-        if not sl_tp:
-            logger.info(f"[IPAF] SL/TP failed | Entry:{current_price:.1f}")
-        else:
-            logger.info(f"[IPAF] SL/TP | Entry:{current_price:.1f} | SL:{sl_tp.stop_loss} | TP:{sl_tp.take_profit} | RR:{sl_tp.actual_rr:.2f}")
+        # Propagate results
+        binance_data['h1_bias'] = h1_bias_result.bias
+        binance_data['h1_candle_bias'] = h1_bias_result.lc
+        binance_data['lr_bias'] = h1_bias_result.lr
+        binance_data['lr_count'] = h1_bias_result.lr_count
+        binance_data['h1_ema9_direction'] = h1_bias_result.l2
+        binance_data['h1_bias_result'] = h1_bias_result
+        binance_data['regime_result'] = regime
+        self._last_h1_bias = h1_bias_result.bias
+        self._last_h1_bias_result = h1_bias_result
 
-        if sl_tp:
-            signal = self.signal_builder.build_ipa(
-                ipa_result=ipaf_result,
-                sl_tp=sl_tp,
-                session=session,
-                regime=regime.regime,
-                mode='IPA_FRVP',  # v11.x: pass mode here so signal_id matches
+        binance_data['snapshot'] = snapshot
+        h1_ema_dist_pct = binance_data.get('h1_ema_dist_pct', 0.0)
+        wall_scan = binance_data.get('wall_scan', {})
+        wall_info = f"{wall_scan.get('raw_dominant', 'NONE')} {wall_scan.get('raw_ratio', 1.0):.1f}x"
+
+        # === v43.8: Smart Silent Display Logic ===
+        show_terminal = (time.time() - self._last_terminal_update >= 60)
+        
+        # v43.8: Extract actual anchor used by FRVP (major swing, not raw fractals)
+        # Always define anchor_info so it's available for signal display
+        anchor_info = {}
+        if frvp_data:
+            swing_layer = frvp_data.get('layers', {}).get('swing_anchored', {})
+            if swing_layer:
+                anchor_info = {
+                    'type': swing_layer.get('anchor_type', 'unknown'),
+                    'price': swing_layer.get('anchor_price', 0),
+                    'move': swing_layer.get('anchor_move', 0),
+                    'age_candles': swing_layer.get('anchor_age_candles', 0),
+                }
+                atr_h1 = h1_swings.get('atr_h1', 0)
+                if atr_h1:
+                    anchor_info['atr_h1'] = atr_h1
+        
+        if show_terminal:
+            self._last_terminal_update = time.time()
+            # 1. Header
+            self.terminal.header(current_price, session, regime.regime, datetime.now().strftime('%Y-%m-%d %H:%M'))
+            # 2. Market Context
+            self.terminal.market_context(
+                regime=regime, h1_bias_result=h1_bias_result, snapshot=snapshot,
+                h1_dist=h1_ema_dist_pct, wall_info=wall_info, anchor_info=anchor_info
             )
-            # No override needed — mode already set in build_ipa
-            
-            account = self._get_account_state()
-            positions = self._get_active_positions()
-            
-            gate_result = self.signal_gate.check(signal, account, positions)
-            if gate_result.passed:
-                self.signal_gate.mark_sent(signal)
-                await self._send_signal(signal)
-                logger.info(f"[IPAF] Sending signal | ID:{signal.get('signal_id')} | Dir:{signal.get('direction')}")
-                return True
-            else:
-                logger.info(f"[IPAF] Gate blocked: {gate_result.reason}")
-                
-                # v19.0: Log skipped signal for IPAF
-                ai_result = getattr(self, '_last_ai_result', None)
-                if ai_result and hasattr(self, 'ai_analyzer'):
-                    self.ai_analyzer.log_skipped_signal(
-                        mode='IPAF',
-                        direction=ipaf_result.direction,
-                        gate_blocked=gate_result.reason,
-                        ai_analysis=ai_result,
-                        score=ipaf_result.score
-                    )
 
+        # v52.0: Save regime snapshot every 1 minute (60s)
+        now = time.time()
+        current_regime = regime.regime if regime else 'UNKNOWN'
+        # v52.0: Initialize on first run
+        if self._last_snapshot_time is None:
+            self._last_snapshot_time = now - 60  # Allow immediate save
+        if self._last_regime is None:
+            self._last_regime = 'INIT'  # Force first save
         
-        return False
-    
-    async def _run_iof_frvp_analysis(self,
-                                    candles_m5: pd.DataFrame,
-                                    current_price: float,
-                                    binance_data: dict,
-                                    frvp_data: dict,
-                                    snapshot=None,
-                                    regime=None) -> bool:
-        """
-        v11.0: Run IOF_FRVP analyzer.
-        Combines IOF (Wall/Delta/OI) with FRVP (POC/VAH/VAL/HVN).
-        v27.0: Added regime parameter (single source of truth).
-        """
-        session = self.session_detector.get_current_session()
-        magnets = self.ict.get_active_magnets(candles_m5, current_price)
-        # v27.0: Use passed regime (already calculated in _run_ipa_iof_analysis)
-        
-        if not regime or not regime.is_iof_suitable:
-            return False
-        
-        # v27.0: Pass atr_m5 from snapshot
-        ioff_result = self.ioff_analyzer.analyze(
-            candles_m5=candles_m5,
+        if (now - self._last_snapshot_time) >= 60 or self._last_regime != current_regime:
+            if self.db:
+                # Get M5 debug data from snapshot
+                m5_debug = getattr(snapshot, '_m5_debug', {}) or {}
+                snap_data = {
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'price': current_price,
+                    'regime': current_regime,
+                    'regime_confidence': getattr(regime, 'regime_confidence', 'MEDIUM'),
+                    'adx': getattr(regime, 'adx_h1', 0),
+                    'bb_width': getattr(regime, 'bb_width', 0),
+                    'm5_state': snapshot.m5_state,
+                    'm5_bias': snapshot.m5_bias,
+                    'h1_bias': h1_bias_result.bias,
+                    'h1_dist_pct': h1_ema_dist_pct,
+                    'wall_info': wall_info,
+                    'delta': snapshot.delta,
+                    'der': snapshot.der,
+                    'signals_sent': 0,
+                    # v52.0: Add M5 debug fields
+                    'er_long': m5_debug.get('er_long', 0),
+                    'er_short': m5_debug.get('er_short', 0),
+                    'vol_rising': 1 if m5_debug.get('vol_rising', False) else 0,
+                    'ema_slope': m5_debug.get('ema_slope', 0),
+                    'net_long': m5_debug.get('net_long', 0),
+                    'net_short': m5_debug.get('net_short', 0),
+                    'atr_est': m5_debug.get('atr_est', 0),
+                }
+                self.db.insert_snapshot(snap_data)
+            self._last_snapshot_time = now
+            self._last_regime = current_regime
+
+        # Detectors context
+        ctx = DetectionContext(
+            candles_m5=candles_m5, candles_h1=candles_h1,
+            current_price=current_price, snapshot=snapshot,
+            regime=regime, h1_bias=h1_bias_result,
+            session=session, magnets=magnets,
+            frvp_data=frvp_data, new_candle=new_candle,
             binance_data=binance_data,
-            current_price=current_price,
-            session=session,
-            magnets=magnets,
-            frvp_data=frvp_data,
-            atr_m5=snapshot.atr_m5, snapshot=snapshot,  # v33.0
         )
-        
-        if ioff_result is None:
-            return False
-        
-        # v24.1: Store for dashboard
-        self._last_ioff_result = ioff_result
-        
-        # v12.0: Signal ready log
-        logger.info(f"[IOFF] Signal ready | Score:{ioff_result.score} | Dir:{ioff_result.direction} | Wall:{ioff_result.wall_price:.1f}")
-        
-        # v12.5: Calculate SL/TP same as IOF runner
-        # v15.9: Use custom_magnets from IOFF result if available (includes EMA20_H1_REVERT)
-        ioff_magnets = ioff_result.custom_magnets if ioff_result.custom_magnets else magnets
-        sl_tp = self.sl_tp_calc.calculate_iof(
-            entry_price=current_price,
-            direction=ioff_result.direction,
-            wall_price=ioff_result.wall_price,
-            atr_m5=ioff_result.atr_m5,
-            session=session,
-            next_resistance=ioff_result.next_resistance,
-            next_support=ioff_result.next_support,
-            magnets=ioff_magnets,
-        )
-        
-        if not sl_tp:
-            logger.info(f"[IOFF] SL/TP failed | Entry:{current_price} | Wall:{ioff_result.wall_price:.1f}")
-            return False
-        
-        logger.info(f"[IOFF] SL/TP | Entry:{current_price} | Wall:{ioff_result.wall_price:.1f} | SL:{sl_tp.stop_loss} | TP:{sl_tp.take_profit} | RR:{sl_tp.actual_rr:.2f} | Dist:{sl_tp.sl_distance:.1f}")
-        
-        # Validate entry-SL distance (same as IOF)
-        min_sl_distance_pct = 0.001  # 0.1% minimum
-        min_sl_distance = current_price * min_sl_distance_pct
-        
-        if ioff_result.direction == 'SHORT':
-            sl_ok = sl_tp.stop_loss > ioff_result.wall_price + min_sl_distance
-            sl_distance = sl_tp.stop_loss - ioff_result.wall_price
-        else:
-            sl_ok = sl_tp.stop_loss < ioff_result.wall_price - min_sl_distance
-            sl_distance = ioff_result.wall_price - sl_tp.stop_loss
-        
-        if not sl_ok:
-            logger.info(f"[IOFF] Entry-SL too tight | Entry:{ioff_result.wall_price} SL:{sl_tp.stop_loss} Dist:{sl_distance:.1f} Min:{min_sl_distance:.1f}")
-            return False
-        
-        signal = self.signal_builder.build_iof(
-            iof_result=ioff_result,
-            sl_tp=sl_tp,
-            session=session,
-            entry_price=current_price,
-            regime=regime.regime,
-            mode='IOF_FRVP',
-        )
-        
+
         account = self._get_account_state()
         positions = self._get_active_positions()
-        
-        gate_result = self.signal_gate.check(signal, account, positions)
-        if gate_result.passed:
-            self.signal_gate.mark_sent(signal)
-            await self._send_signal(signal)
-            logger.info(f"[IOFF] Sending signal | ID:{signal.get('signal_id')} | Dir:{signal.get('direction')}")
-            return True
-        else:
-            logger.info(f"[IOFF] Gate blocked: {gate_result.reason}")
-            
-            # v19.0: Log skipped signal for IOFF
-            ai_result = getattr(self, '_last_ai_result', None)
-            if ai_result and hasattr(self, 'ai_analyzer'):
-                self.ai_analyzer.log_skipped_signal(
-                    mode='IOFF',
-                    direction=ioff_result.direction,
-                    gate_blocked=gate_result.reason,
-                    ai_analysis=ai_result,
-                    score=ioff_result.score
-                )
+        detector_signals = []
 
-        
-        return False
+        for detector in self.detectors:
+            # Skip according to timing
+            if detector.timing == 'CANDLE_CLOSE':
+                if not new_candle: continue
+            elif detector.timing == 'EVERY_60S':
+                now = time.time()
+                last_run = getattr(detector, '_last_detect_time', 0)
+                if now - last_run < 60: continue
+                detector._last_detect_time = now
+
+            # Detect
+            signals = detector.detect(ctx)
+
+            if not signals:
+                if show_terminal:
+                    # Show skip reason only on 60s update
+                    timing_str = '60s' if detector.timing == 'EVERY_60S' else 'candle'
+                    self.terminal.detector_header(detector.signal_type, timing=timing_str)
+                    reason = getattr(detector, 'last_reject_reason', 'No signal detected')
+                    self.terminal.detector_no_signal(detector.signal_type, reason)
+                continue
+
+            # Signal found!
+            if not show_terminal:
+                # Force print header if signal found but 60s not reached
+                self.terminal.header(current_price, session, regime.regime, datetime.now().strftime('%Y-%m-%d %H:%M'))
+                self.terminal.market_context(regime=regime, h1_bias_result=h1_bias_result, snapshot=snapshot, h1_dist=h1_ema_dist_pct, wall_info=wall_info, anchor_info=anchor_info)
+            
+            timing_str = '60s' if detector.timing == 'EVERY_60S' else 'candle'
+            self.terminal.detector_header(detector.signal_type, timing=timing_str)
+
+            for sig in signals:
+                # v48.0: MOD-21 BUG-6 — Delta Alignment Window
+                # If signal has 'pending_delta', add to watch list instead of firing
+                if sig.score_breakdown and sig.score_breakdown.get('pending_delta'):
+                    self.pending_delta_signals.append({
+                        'signal': sig,
+                        'timestamp': time.time(),
+                        'entry_zone_min': sig.score_breakdown.get('entry_zone_min', sig.entry_price * 0.999),
+                        'entry_zone_max': sig.score_breakdown.get('entry_zone_max', sig.entry_price * 1.001),
+                        'direction': sig.direction,
+                        'ctx': ctx # Store context snapshot
+                    })
+                    self.terminal.gate(f'DELTA_WATCH_{sig.signal_type}', True, 'Pending 30s Alignment...')
+                    continue
+
+                if sig.signal_type.startswith('VP_'):
+                    verified, verify_reason = self._quick_verify(sig, ctx)
+                    if not verified:
+                        self.terminal.gate('QuickVerify', False, verify_reason)
+                        continue
+
+                sl_tp = self.sl_tp_calc.calculate(sig)
+                if not sl_tp:
+                    self.terminal.gate('SL/TP', False, 'Calculation failed')
+                    continue
+
+                payload = self.signal_builder.build_from_result(sig, sl_tp)
+                # Populate required gate fields
+                # v44.4: Add FRVP anchor_type and DER fields for new gates
+                frvp_anchor_type = ''
+                if frvp_data:
+                    swing_layer = frvp_data.get('layers', {}).get('swing_anchored', {})
+                    frvp_anchor_type = swing_layer.get('anchor_type', '')
+                
+                payload.update({
+                    'wall_info': wall_info,
+                    'h1_dist_pct': h1_ema_dist_pct,
+                    'der': snapshot.der,
+                    'der_direction': snapshot.der_direction,
+                    'der_persistence': snapshot.der_persistence,
+                    'm5_state': snapshot.m5_state,
+                    'delta': snapshot.delta,
+                    'm5_ema_position': snapshot.m5_ema_position,
+                    'current_price': current_price,
+                    'regime_confidence': regime.regime_confidence,
+                    'anchor_type': frvp_anchor_type,  # MOD-2: for FRVP_DIRECTION_BLOCK
+                    'm5_bias': getattr(snapshot, 'm5_bias', 'NEUTRAL'),
+                    'm5_bias_level': getattr(snapshot, 'm5_bias_level', 'NEUTRAL'),
+                    'm5_swing_structure': getattr(snapshot, 'm5_swing_structure', 'NEUTRAL'),
+                    'm5_swing_ema_overextended': getattr(snapshot, 'm5_swing_ema_overextended', False),
+                    'm5_swing_reversal_hint': getattr(snapshot, 'm5_swing_reversal_hint', False),
+                    'h1_swing_structure': getattr(snapshot, 'h1_swing_structure', 'NEUTRAL'),
+                    'h1_swing_ema_overextended': getattr(snapshot, 'h1_swing_ema_overextended', False),
+                    'h1_swing_reversal_hint': getattr(snapshot, 'h1_swing_reversal_hint', False),
+                    # v51.3: H1 overextension — use CURRENT H1 (iloc[-2] caused 145% false positive on breakout)
+                    'h1_last_high': float(candles_h1.iloc[-1]['high']) if candles_h1 is not None and len(candles_h1) >= 1 else 0,
+                    'h1_last_low': float(candles_h1.iloc[-1]['low']) if candles_h1 is not None and len(candles_h1) >= 1 else 0,
+                    'wall_stability_seconds': getattr(snapshot, 'wall_stability_sec', 0),
+                })
+                if h1_bias_result:
+                    payload.update({
+                        'l0': h1_bias_result.l0,
+                        'l1': h1_bias_result.l1,
+                        'l2': h1_bias_result.l2,
+                        'l3': h1_bias_result.l3,
+                        'h1_bias': h1_bias_result.bias,              # v50.4: direction (BULLISH/BEARISH/NEUTRAL)
+                        'h1_bias_level': h1_bias_result.bias_level,  # MOD-4: for IPA_H1_BIAS_CLIMAX_BLOCK
+                    })
+
+                gate_result = self.signal_gate.check(payload, account, positions)
+                if gate_result.passed:
+                    self.signal_gate.mark_sent(payload)
+                    await self._send_signal(payload)
+                    
+                    # v51.2: Record SENT signal to DB
+                    if hasattr(self, 'db') and self.db:
+                        breakdown = payload.get('extra_data', {}).get('score_breakdown') or payload.get('score_breakdown')
+                        # Trades table: slim execution data only
+                        trade_data = {
+                            'signal_id': payload.get('signal_id'),
+                            'mode': payload.get('mode'),
+                            'direction': payload.get('direction'),
+                            'signal_type': sig.signal_type,
+                            'entry_price': payload.get('entry_price'),
+                            'stop_loss': payload.get('stop_loss'),
+                            'take_profit': payload.get('take_profit'),
+                            'score': sig.score,
+                            'status': 'SIGNAL_SENT',
+                            'timestamp': datetime.now(timezone.utc).isoformat()
+                        }
+                        self.db.insert_trade(trade_data)
+                        # Telemetry: FULL context — payload + snapshot + regime + VP
+                        self.db.insert_signal_telemetry(payload.get('signal_id'), {
+                            **payload,
+                            'signal_type': sig.signal_type,
+                            'score': sig.score,
+                            'gate_status': 'PASSED',
+                            'breakdown': breakdown,
+                            # v51.4: Fields missing from payload — from snapshot/regime/frvp
+                            'regime': regime.regime if regime else None,
+                            'der_sustainability': getattr(snapshot, 'der_sustainability', None),
+                            'atr_m5': getattr(snapshot, 'atr_m5', None),
+                            'h1_ema9': getattr(snapshot, 'h1_ema9', None) if hasattr(snapshot, 'h1_ema9') else (h1_bias_result.ema9 if h1_bias_result and hasattr(h1_bias_result, 'ema9') else None),
+                            'h1_ema20': getattr(snapshot, 'h1_ema20', None) if hasattr(snapshot, 'h1_ema20') else (h1_bias_result.ema20 if h1_bias_result and hasattr(h1_bias_result, 'ema20') else None),
+                            'h1_ema50': getattr(snapshot, 'h1_ema50', None) if hasattr(snapshot, 'h1_ema50') else (h1_bias_result.ema50 if h1_bias_result and hasattr(h1_bias_result, 'ema50') else None),
+                            'vp_poc': getattr(snapshot, 'vp_poc', None),
+                            'vp_vah': getattr(snapshot, 'vp_vah', None),
+                            'vp_val': getattr(snapshot, 'vp_val', None),
+                            'vp_price_vs_va': getattr(snapshot, 'vp_price_vs_va', None),
+                            'oi': getattr(snapshot, 'oi_change_pct', None),
+                            'funding': binance_data.get('funding_rate'),
+                            # Group B: snapshot raw metrics
+                            'm5_efficiency': getattr(snapshot, 'm5_efficiency', None),
+                            'm5_dist_pct': getattr(snapshot, 'm5_dist_pct', None),
+                            'ema_trend': getattr(snapshot, 'ema_trend', None),
+                            'pullback': binance_data.get('pullback'),
+                            'wall_stability_seconds': getattr(snapshot, 'wall_stability_sec', None),
+                            'raw_wall_ratio': binance_data.get('wall_scan', {}).get('raw_ratio') if binance_data.get('wall_scan') else None,
+                            'raw_volume_ratio': getattr(snapshot, 'volume_ratio_m5', None),
+                            'raw_m5_efficiency': getattr(snapshot, 'm5_efficiency', None),
+                            'raw_oi_change_pct': getattr(snapshot, 'oi_change_pct', None),
+                            'raw_atr_ratio': getattr(snapshot, 'atr_ratio', None),
+                        })
+
+                    detector_signals.append(sig.signal_type)
+                    self.terminal.detector_signal(
+                        signal_type=sig.signal_type, direction=sig.direction,
+                        score=sig.score, threshold=sig.threshold, entry_price=sig.entry_price,
+                        sl=sl_tp.stop_loss, tp=sl_tp.take_profit, rr=sl_tp.actual_rr,
+                        der=payload.get('der', 0), der_dir='S' if payload.get('der', 0) < 0 else 'B',
+                        wall=payload.get('wall_info', ''), m5_state=payload.get('m5_state', ''),
+                    )
+                else:
+                    self.terminal.detector_blocked(sig.signal_type, sig.direction, sig.score, gate_result.reason)
+                    # v51.2: Log gate block + telemetry with FULL payload
+                    if hasattr(self, 'db') and self.db:
+                        breakdown = payload.get('extra_data', {}).get('score_breakdown') or payload.get('score_breakdown')
+                        # Gate blocks table: block reason
+                        block_data = {
+                            'signal_id': payload.get('signal_id'),
+                            'mode': sig.signal_type,
+                            'direction': sig.direction,
+                            'signal_type': sig.signal_type,
+                            'score': sig.score,
+                            'gate_reason': gate_result.reason,
+                            'price': payload.get('current_price'),
+                            'breakdown': breakdown,
+                        }
+                        self.db.insert_gate_block(block_data)
+                        # Telemetry: FULL context even for blocked signals
+                        self.db.insert_signal_telemetry(payload.get('signal_id'), {
+                            **payload,
+                            'signal_type': sig.signal_type,
+                            'score': sig.score,
+                            'gate_status': 'BLOCKED',
+                            'block_reason': gate_result.reason,
+                            'breakdown': breakdown,
+                            # v51.4: Fields missing from payload
+                            'regime': regime.regime if regime else None,
+                            'der_sustainability': getattr(snapshot, 'der_sustainability', None),
+                            'atr_m5': getattr(snapshot, 'atr_m5', None),
+                            'h1_ema9': getattr(snapshot, 'h1_ema9', None) if hasattr(snapshot, 'h1_ema9') else (h1_bias_result.ema9 if h1_bias_result and hasattr(h1_bias_result, 'ema9') else None),
+                            'h1_ema20': getattr(snapshot, 'h1_ema20', None) if hasattr(snapshot, 'h1_ema20') else (h1_bias_result.ema20 if h1_bias_result and hasattr(h1_bias_result, 'ema20') else None),
+                            'h1_ema50': getattr(snapshot, 'h1_ema50', None) if hasattr(snapshot, 'h1_ema50') else (h1_bias_result.ema50 if h1_bias_result and hasattr(h1_bias_result, 'ema50') else None),
+                            'vp_poc': getattr(snapshot, 'vp_poc', None),
+                            'vp_vah': getattr(snapshot, 'vp_vah', None),
+                            'vp_val': getattr(snapshot, 'vp_val', None),
+                            'vp_price_vs_va': getattr(snapshot, 'vp_price_vs_va', None),
+                            'oi': getattr(snapshot, 'oi_change_pct', None),
+                            'funding': binance_data.get('funding_rate'),
+                            # Group B: snapshot raw metrics
+                            'm5_efficiency': getattr(snapshot, 'm5_efficiency', None),
+                            'm5_dist_pct': getattr(snapshot, 'm5_dist_pct', None),
+                            'ema_trend': getattr(snapshot, 'ema_trend', None),
+                            'pullback': binance_data.get('pullback'),
+                            'wall_stability_seconds': getattr(snapshot, 'wall_stability_sec', None),
+                            'raw_wall_ratio': binance_data.get('wall_scan', {}).get('raw_ratio') if binance_data.get('wall_scan') else None,
+                            'raw_volume_ratio': getattr(snapshot, 'volume_ratio_m5', None),
+                            'raw_m5_efficiency': getattr(snapshot, 'm5_efficiency', None),
+                            'raw_oi_change_pct': getattr(snapshot, 'oi_change_pct', None),
+                            'raw_atr_ratio': getattr(snapshot, 'atr_ratio', None),
+                        })
+
+        # v43.7: Commit POC state
+        if hasattr(self, 'frvp_engine'):
+            pass  # Already handled in main loop
+
+        return len(detector_signals) > 0
+
+    def _quick_verify(self, sig, ctx) -> tuple:
+        """v43.7: Quick Verify — check conditions still valid before send."""
+        # 1. Wall still there? (for VP_ABSORB, VP_BOUNCE)
+        if sig.signal_type in ('VP_ABSORB', 'VP_BOUNCE'):
+            wall = ctx.binance_data.get('wall_scan', {})
+            if wall.get('raw_ratio', 0) < 2.0:
+                return False, 'Wall disappeared'
+
+        # 2. Price slip check
+        slip = abs(ctx.current_price - sig.entry_price) / sig.entry_price * 100 if sig.entry_price > 0 else 0
+        if slip > 0.1:
+            return False, f'Price slipped {slip:.2f}%'
+
+        # 3. Delta still same direction — skip VP_REVERT (mean reversion = counter-delta by design)
+        if sig.signal_type != 'VP_REVERT':
+            delta = ctx.binance_data.get('delta', 0)
+            if sig.direction == 'LONG' and delta < -abs(sig.delta) * 0.5:
+                return False, 'Delta reversed'
+            if sig.direction == 'SHORT' and delta > abs(sig.delta) * 0.5:
+                return False, 'Delta reversed'
+
+        return True, 'OK'
 
     def _get_account_state(self) -> AccountState:
         """Build AccountState from current risk manager state."""
         try:
-            daily_loss_pct = getattr(self.risk_manager, 'drawdown_pct', 0) if self.risk_manager else 0
-            equity = getattr(self.risk_manager, 'equity', 0) if self.risk_manager else 0
-            balance = getattr(self.risk_manager, 'balance', 0) if self.risk_manager else 0
+            daily_loss_pct = self.risk_manager.position_sizer.daily_loss if self.risk_manager else 0
+            equity = self.risk_manager.equity if self.risk_manager else 0
+            balance = self.risk_manager.balance if self.risk_manager else 0
             positions = self._get_active_positions()
 
             return AccountState(
@@ -924,6 +740,116 @@ class BTCSFBot:
             )
         except Exception:
             return AccountState.empty()
+
+    async def _handle_pending_delta_signals(self, ctx: DetectionContext):
+        """
+        v48.0: MOD-21 BUG-6 — Institutional Delta Alignment Window (30s)
+        Re-checks signals that were valid at candle-close but had opposite Delta.
+        Fires if new candle Delta aligns while price is still in zone.
+        """
+        now = time.time()
+        current_delta = ctx.binance_data.get('delta', 0.0)
+        current_price = ctx.current_price
+        remaining_signals = []
+
+        for item in self.pending_delta_signals:
+            sig = item['signal']
+            age = now - item['timestamp']
+            
+            # 1. Timeout check (30 seconds)
+            if age > 30:
+                self.terminal.gate(f'DELTA_TIMEOUT_{sig.signal_type}', False, 'Window closed')
+                continue
+            
+            # 2. Zone check (Price must still be in the entry zone)
+            if not (item['entry_zone_min'] <= current_price <= item['entry_zone_max']):
+                # If price left zone, signal is invalid
+                self.terminal.gate(f'DELTA_ZONE_FAIL_{sig.signal_type}', False, f'Price {current_price:.0f} left zone')
+                continue
+
+            # 3. Delta Alignment Check
+            # We check if NEW candle delta matches direction
+            confirmed = False
+            if sig.direction == 'LONG' and current_delta > 5.0:  # Min 5 units to avoid noise
+                confirmed = True
+            elif sig.direction == 'SHORT' and current_delta < -5.0:
+                confirmed = True
+            
+            if confirmed:
+                self.terminal.gate(f'DELTA_CONFIRM_{sig.signal_type}', True, f'Aligned at +{age:.1f}s (D:{current_delta:.1f})')
+                # 4. Proceed to fire (Gate + Send)
+                # Note: We use original sl_tp and ctx from signal generation
+                sl_tp = self.sl_tp_calc.calculate(sig)
+                if sl_tp:
+                    await self._process_verified_signal(sig, sl_tp, ctx)
+                # Once fired, don't keep in pending
+            else:
+                # Still waiting
+                remaining_signals.append(item)
+        
+        self.pending_delta_signals = remaining_signals
+
+    async def _process_verified_signal(self, sig, sl_tp, ctx):
+        """Helper to pass through gate and send to MT5."""
+        # v52.0: Convert SignalResult to dict for gate check
+        signal_dict = {
+            'signal_id': getattr(sig, 'signal_id', ''),
+            'signal_type': sig.signal_type,
+            'direction': sig.direction,
+            'entry_price': sig.entry_price,
+            'score': sig.score,
+            'required_rr': getattr(sig, 'required_rr', 0),
+            'm5_state': sig.m5_state,
+            'h1_bias_level': sig.h1_bias_level,
+            'regime': sig.regime,
+            'der': sig.der,
+            'delta': sig.delta,
+            'wall_info': sig.wall_info,
+            'session': sig.session,
+            'atr_m5': sig.atr_m5,
+            'h1_swing_structure': ctx.binance_data.get('h1_swing_structure', 'NEUTRAL'),
+            'h1_swing_ema_overextended': ctx.binance_data.get('h1_swing_ema_overextended', False),
+            'h1_swing_reversal_hint': ctx.binance_data.get('h1_swing_reversal_hint', False),
+            'm5_swing_structure': ctx.binance_data.get('m5_swing_structure', 'NEUTRAL'),
+            'm5_swing_ema_overextended': ctx.binance_data.get('m5_swing_ema_overextended', False),
+            'm5_swing_reversal_hint': ctx.binance_data.get('m5_swing_reversal_hint', False),
+            'h1_dist_pct': sig.h1_dist_pct,
+            'm5_bias': ctx.binance_data.get('m5_bias', 'NEUTRAL'),
+            'm5_bias_level': ctx.binance_data.get('m5_bias_level', 'NEUTRAL'),
+            'h1_last_high': ctx.binance_data.get('h1_last_high', 0),
+            'h1_last_low': ctx.binance_data.get('h1_last_low', 0),
+            'anchor_type': ctx.binance_data.get('anchor_type', ''),
+        }
+        
+        # v51.2: Get account and positions for gate check
+        account = self._get_account_state()
+        positions = self._get_active_positions()
+        
+        # Gate
+        gate_res = self.signal_gate.check(signal_dict, account, positions)
+        if not gate_res.passed:
+            self.terminal.gate(sig.signal_type, False, gate_res.reason)
+            return
+
+        # Prepare and Send
+        # v54.0: Fix - build() needs mode, direction, entry_price, sl_tp, session, score
+        mode = 'IPA'  # v54.0: All signal types use IPA timing
+        signal_msg = self.signal_builder.build(
+            mode=mode,
+            direction=sig.direction,
+            entry_price=sig.entry_price,
+            sl_tp=sl_tp,
+            session=sig.session,
+            score=sig.score,
+            regime=sig.regime,
+            short_reason=sig.signal_type
+        )
+        from src.execution.signal_publisher import get_signal_sender
+        sender = get_signal_sender()
+        if sender.send(signal_msg):
+            self.terminal.gate(sig.signal_type, True, 'SENT TO MT5 (Delta Aligned)')
+            self._last_sent_signal = signal_msg
+            if self.telegram: self.telegram.send_signal(signal_msg)
 
     def _get_active_positions(self) -> List[PositionInfo]:
         """
@@ -945,7 +871,7 @@ class BTCSFBot:
                     mode = 'IPA'  # Default legacy
                     # Check FRVP-style comments first
                     if 'IPA_FRVP' in comment:
-                        mode = 'IPAF'
+                        mode = 'IPA'
                     elif 'IOF_FRVP' in comment:
                         mode = 'IOFF'
                     # Check standard prefix (check longer modes first)
@@ -1009,7 +935,7 @@ class BTCSFBot:
 
             # v27.3: Signal mode determines if AI comparison is valid
             mode = signal.get('mode', '')
-            is_ipa_mode = mode in ('IPA', 'IPA_FRVP')
+            is_ipa_mode = mode == 'IPA'
             # IPA/IPAF วิ่งพร้อม AI (candle close) → เทียบได้ตรง
             # IOF/IOFF วิ่งทุก 15 วิ → AI อาจ stale → บอกใน log
             ai_tag = "FRESH" if ai_fresh else f"STALE_{ai_age_sec}s"
@@ -1045,54 +971,62 @@ class BTCSFBot:
                 )
             
             # v26.0: Log trade entry with full market context
-            from src.execution.webhook_server import dashboard_state
+            # v31.0: Read from live sources directly to avoid stale dashboard_state
+            # (dashboard_state is updated AFTER _send_signal completes in the main loop)
+            _bd = getattr(self, '_last_binance_data', {}) or {}
+            _h1r = getattr(self.ipa_analyzer, '_last_h1_result', None) or {}
+            _h1_bias = getattr(self, '_last_h1_bias_result', None)
+            _wall_scan = _bd.get('wall_scan', {}) or {}
+            _wall_dom = _wall_scan.get('raw_dominant', 'NONE')
+            _wall_ratio = _wall_scan.get('raw_ratio', 1.0)
+            _of_summary = _bd.get('order_flow_summary', {}) or {}
             market_ctx = {
                 # H1 Bias Layers
-                'l0': dashboard_state.get('bias_layers', {}).get('l0'),
-                'l1': dashboard_state.get('bias_layers', {}).get('l1'),
-                'l2': dashboard_state.get('bias_layers', {}).get('l2'),
-                'l3': dashboard_state.get('bias_layers', {}).get('l3'),
-                'lc': dashboard_state.get('bias_layers', {}).get('lc'),
-                'lr': dashboard_state.get('bias_layers', {}).get('lr'),
+                'l0': getattr(_h1_bias, 'l0', 'NEUTRAL') if _h1_bias else 'NEUTRAL',
+                'l1': getattr(_h1_bias, 'l1', 'NEUTRAL') if _h1_bias else 'NEUTRAL',
+                'l2': getattr(_h1_bias, 'l2', 'NEUTRAL') if _h1_bias else 'NEUTRAL',
+                'l3': getattr(_h1_bias, 'l3', 'NEUTRAL') if _h1_bias else 'NEUTRAL',
+                'lc': getattr(_h1_bias, 'lc', 'NEUTRAL') if _h1_bias else 'NEUTRAL',
+                'lr': getattr(_h1_bias, 'lr', 'NEUTRAL') if _h1_bias else 'NEUTRAL',
                 # H1 EMA
-                'h1_ema9': dashboard_state.get('market', {}).get('ema9'),
-                'h1_ema20': dashboard_state.get('market', {}).get('ema20'),
-                'h1_ema50': dashboard_state.get('market', {}).get('ema50'),
-                'h1_dist_pct': dashboard_state.get('market', {}).get('h1_dist_pct'),
-                'ema_trend': dashboard_state.get('market', {}).get('ema_trend'),
+                'h1_ema9': _bd.get('ema9'),
+                'h1_ema20': _bd.get('ema20'),
+                'h1_ema50': _bd.get('ema50'),
+                'h1_dist_pct': _bd.get('h1_ema_dist_pct', 0),
+                'ema_trend': _h1_bias.bias if _h1_bias else None,
                 # Pullback
-                'pullback': dashboard_state.get('market', {}).get('pullback_status'),
+                'pullback': (_bd.get('pullback', {}) or {}).get('status', 'NONE'),
                 # Wall
-                'wall_info': dashboard_state.get('market', {}).get('wall_info'),
+                'wall_info': f"{_wall_dom} {_wall_ratio:.1f}x",
                 # Order Flow
-                'delta': dashboard_state.get('order_flow', {}).get('delta'),
-                'der': dashboard_state.get('order_flow', {}).get('der'),
-                'oi': dashboard_state.get('order_flow', {}).get('oi'),
-                'funding': dashboard_state.get('order_flow', {}).get('funding_rate'),
-                # MLVP
-                'poc': dashboard_state.get('mlvp', {}).get('composite_poc'),
-                'vah': dashboard_state.get('mlvp', {}).get('composite_vah'),
-                'val': dashboard_state.get('mlvp', {}).get('composite_val'),
+                'delta': _of_summary.get('delta'),
+                'der': _of_summary.get('der'),
+                'oi': getattr(self, '_last_oi', None),
+                'funding': _bd.get('funding_rate'),
+                # v50.8: MLVP — use swing_anchored (matches TradingView)
+                'poc': round((getattr(self, '_last_frvp_data', None) or {}).get('layers', {}).get('swing_anchored', {}).get('poc') or 0, 1) or None,
+                'vah': round((getattr(self, '_last_frvp_data', None) or {}).get('layers', {}).get('swing_anchored', {}).get('vah') or 0, 1) or None,
+                'val': round((getattr(self, '_last_frvp_data', None) or {}).get('layers', {}).get('swing_anchored', {}).get('val') or 0, 1) or None,
                 # Score breakdown
                 'breakdown': signal.get('score_breakdown') or signal.get('breakdown'),
                 # v29.1: Missing fields for analysis
-                'm5_state': dashboard_state.get('market', {}).get('m5_state'),
-                'regime': dashboard_state.get('market', {}).get('regime'),
-                'h1_bias_level': dashboard_state.get('market', {}).get('h1_bias_level'),
+                'm5_state': _bd.get('m5_state'),
+                'regime': self._cached_regime.regime if self._cached_regime else None,
+                'h1_bias_level': _h1_bias.bias_level if _h1_bias else None,
                 # v30.7: DER stability + M5 context for analyst
-                'der_direction': dashboard_state.get('order_flow', {}).get('der_direction'),
-                'der_persistence': dashboard_state.get('order_flow', {}).get('der_persistence'),
-                'der_sustainability': dashboard_state.get('order_flow', {}).get('der_sustainability'),
-                'm5_efficiency': dashboard_state.get('market', {}).get('m5_efficiency'),
-                'm5_ema_position': dashboard_state.get('market', {}).get('m5_ema_position'),
-                'atr_m5': dashboard_state.get('market', {}).get('atr_m5'),
+                'der_direction': _bd.get('der_direction'),
+                'der_persistence': _bd.get('der_persistence'),
+                'der_sustainability': _bd.get('der_sustainability'),
+                'm5_efficiency': _bd.get('m5_efficiency'),
+                'm5_ema_position': _bd.get('m5_ema_position'),
+                'atr_m5': _bd.get('atr_m5'),
                 # v29.1: Chart patterns (data only — not used as gate)
                 # v27.3: AI freshness — for accurate backtest comparison
                 'ai_fresh': ai_fresh,
                 'ai_age_sec': ai_age_sec,
             }
             self.ai_analyzer.log_trade_entry(
-                signal_id=signal.get('signal_id', ''),
+                signal_id=signal.get('signal_id', ''),  # v42.2: signal_id is required
                 signal=signal,
                 ai_analysis=ai_result,
                 market_context=market_ctx
@@ -1111,33 +1045,26 @@ class BTCSFBot:
             await self.telegram.send_signal_alert(signal)
 
     def _update_trade_ai(self, signal_id: str, ai_result: dict):
-        """v28.1: Update trade log record with AI analysis after EA OPENED."""
+        """v36.2: Update trade with AI analysis after EA OPENED using database."""
         try:
-            log_path = self.ai_analyzer._log_path
-            if not log_path.exists():
+            trade = self.ai_analyzer._db.get_trade(signal_id)
+            if not trade or trade.get('status') != 'OPENED':
                 return
-            lines = []
-            updated = False
-            with open(log_path, 'r') as f:
-                for line in f:
-                    record = json.loads(line.strip())
-                    if record.get('signal_id') == signal_id and record.get('status') == 'OPENED':
-                        record['ai_bias'] = ai_result.get('bias')
-                        record['ai_confidence'] = ai_result.get('confidence')
-                        record['ai_action'] = ai_result.get('action')
-                        record['ai_reason'] = ai_result.get('reason', '')[:100]
-                        record['ai_aligned'] = self.ai_analyzer._check_aligned(
-                            record.get('direction'), ai_result
-                        )
-                        updated = True
-                    lines.append(json.dumps(record, default=str))
-            if updated:
-                with open(log_path, 'w') as f:
-                    f.write('\n'.join(lines) + '\n')
-                logger.info(
-                    f"[AI] Trade {signal_id} | {ai_result.get('bias')} {ai_result.get('confidence')}% "
-                    f"{'ALIGNED' if record.get('ai_aligned') else 'CONFLICT'}"
-                )
+            
+            # Update trade with AI info
+            self.ai_analyzer._db.update_trade(signal_id, {
+#                 'ai_bias': ai_result.get('bias'),
+                'ai_confidence': ai_result.get('confidence'),
+                'ai_action': ai_result.get('action'),
+                'ai_reason': ai_result.get('reason', '')[:100],
+                'ai_aligned': 1 if self.ai_analyzer._check_aligned(
+                    trade.get('direction'), ai_result
+                ) else 0
+            })
+            logger.info(
+                f"[AI] Trade {signal_id} | {ai_result.get('bias')} {ai_result.get('confidence')}% "
+                f"{'ALIGNED' if self.ai_analyzer._check_aligned(trade.get('direction'), ai_result) else 'CONFLICT'}"
+            )
         except Exception as e:
             logger.warning(f"[AI] Update trade AI error: {e}")
 
@@ -1185,7 +1112,12 @@ class BTCSFBot:
                 mfe = data.get('mfe', 0)  # v26.0: max favorable excursion
                 mae = data.get('mae', 0)  # v26.0: max adverse excursion
                 self.ai_analyzer.log_trade_exit(signal_id, pnl, status, mfe=mfe, mae=mae)
-                
+
+                # v51.3 MOD-42: Update loss streak counter
+                trade_result = 'WIN' if status == 'TP' else 'LOSS'
+                if hasattr(self, 'signal_gate'):
+                    self.signal_gate.on_trade_result(trade_result)
+
         except Exception as e:
             logger.warning(f"[EA] Confirmation handling error: {e}")
 
@@ -1450,11 +1382,16 @@ class BTCSFBot:
                 bids = order_book.get('bids', [])
                 asks = order_book.get('asks', [])
             
-            # Get recent trades
-            trades = self.cache.get_trades(100)
+            # v42.2: Get fresh recent trades from exchange for accurate delta calculation
+            # Cache may be empty or stale - use connector for real-time data
+            try:
+                trades = self.connector.get_recent_trades(symbol, limit=100)
+            except Exception as e:
+                logger.debug(f"[Trades] Fetch failed: {e}, using cache")
+                trades = self.cache.get_trades(100)
             
             # Get candles
-            candles = self.connector.get_ohlcv(symbol, timeframe, limit=300)  # 300 M5 bars = 25 hours
+            candles = self.connector.get_ohlcv(symbol, timeframe, limit=300)
 
             # v25.0: Store last 50 close prices for frontend chart
             if not candles.empty:
@@ -1642,10 +1579,10 @@ class BTCSFBot:
             else:
                 binance_data['der_direction'] = 'NEUTRAL'
 
-            # v27.2: Detect new M5 candle close
+                # v27.2: Detect new M5 candle close (store for analyze_and_trade)
             latest_candle_time = candles.index[-1] if len(candles) > 0 else None
-            new_candle = (latest_candle_time != self._last_candle_time)
-            if new_candle and latest_candle_time is not None:
+            self._new_candle = (latest_candle_time != self._last_candle_time)
+            if self._new_candle and latest_candle_time is not None:
                 self._last_candle_time = latest_candle_time
 
             # v27.3: News context for AI
@@ -1659,6 +1596,9 @@ class BTCSFBot:
                     binance_data['news_context'] = f"{news_event['title'][:25]} NOW"
             else:
                 binance_data['news_context'] = 'none'
+            
+            # v36.3: Store new_candle flag for analyze_and_trade
+            binance_data['new_candle'] = self._new_candle
 
             # v28.1: AI periodic analysis REMOVED — AI now evaluates per-signal in _send_signal()
             # Keep cached result for dashboard display
@@ -1687,7 +1627,7 @@ class BTCSFBot:
                 current_price=self.current_price,
                 binance_data=binance_data,
                 cycle_start_time=cycle_start_time,
-                new_candle=new_candle,  # v27.2: IPA runs only on candle close
+                new_candle=self._new_candle,  # v27.2: IPA runs only on candle close
             )
 
             # Update IOF throttle time
@@ -1701,11 +1641,12 @@ class BTCSFBot:
             # v4.9 M5: Legacy SignalManagerV3 signal generation REMOVED.
             # All signals now come from _run_ipa_iof_analysis() (every 30s).
             
-            # === v4.9 M5: Risk Tier Check ===
-            allowed, reason = self.risk_manager.check_trading_allowed() if self.risk_manager else (True, "")
-            if not allowed:
-                logger.warning(f"Trading not allowed (Risk Tier): {reason}")
-                return
+            # === Risk Tier Check REMOVED ===
+            # User requested: Only EA handles risk blocking, Python sends all signals
+            # allowed, reason = self.risk_manager.check_trading_allowed() if self.risk_manager else (True, "")
+            # if not allowed:
+            #     logger.warning(f"Trading not allowed (Risk Tier): {reason}")
+            #     return
             
             # === v4.9 M5: Trailing (EA handles independently — no Python-side trailing) ===
             # active_signals tracked from IPA/IOF results are forwarded to EA via _send_signal
@@ -1739,12 +1680,12 @@ class BTCSFBot:
                 session = self.session_detector.get_current_session()
                 ipa_s = self._last_ipa_result.score if self._last_ipa_result else 0
                 iof_s = self._last_iof_result.score if self._last_iof_result else 0
-                logger.info(
-                    f"💓 BTC ${self.current_price:,.0f} | "
-                    f"Session:{session} | "
-                    f"Regime:{regime.regime if regime else 'N/A'} | "
-                    f"IPA:{ipa_s}/12 | IOF:{iof_s}/11"
-                )
+                # logger.info(
+#                     f"💓 BTC ${self.current_price:,.0f} | "
+#                     f"Session:{session} | "
+#                     f"Regime:{regime.regime if regime else 'N/A'} | "
+#                     f"IPA:{ipa_s}/12 | IOF:{iof_s}/11"
+#                 )
                 self._last_heartbeat_log = now
             
             # === v24.0: Push Data to Dashboard State ===
@@ -1944,11 +1885,12 @@ class BTCSFBot:
         
         # MLVP — v25.0: guard against None in composite
         if frvp_data:
-            composite = frvp_data.get('composite', {}) or {}
+            # v50.8: Use swing_anchored for display (matches TradingView)
+            swing_vp = frvp_data.get('layers', {}).get('swing_anchored', {}) or {}
             dashboard_state['mlvp'].update({
-                'composite_poc': round(composite.get('poc') or 0, 1),
-                'composite_vah': round(composite.get('vah') or 0, 1),
-                'composite_val': round(composite.get('val') or 0, 1),
+                'composite_poc': round(swing_vp.get('poc') or 0, 1),
+                'composite_vah': round(swing_vp.get('vah') or 0, 1),
+                'composite_val': round(swing_vp.get('val') or 0, 1),
                 'current_session': session,
                 'confluence_zones': frvp_data.get('confluence_zones', [])[:5],
             })
@@ -2016,9 +1958,12 @@ class BTCSFBot:
             logger.error("Failed to initialize bot")
             return
         
+        # v50.8: Old reconcile removed — replaced by _reconcile_with_mt5() in __init__
+        # OPENED trades are NOT marked STALE on startup — wait for EA confirm
+        
         # v19.0: Register webhook callbacks
         if hasattr(self, 'ai_analyzer'):
-            set_confirmation_callback(self.on_ea_confirmation)
+            # set_confirmation_callback(self.on_ea_confirmation) # DISABLED
             logger.info("[Webhook] EA confirmation callback registered")
         
         # v19.0: Start webhook server in background
@@ -2061,10 +2006,12 @@ class BTCSFBot:
                     logger.debug(f"[ZMQ] Received: {topic}")
                     
                     if topic == 'account_info':
-                        self.risk_manager.update_account_state(data)
+                        if self.risk_manager:
+                            self.risk_manager.update_account_state(data)
                         # logger.debug(f"Account state updated: Equity={data.get('equity')}") # Silenced per user request
                     elif topic == 'position_info':
-                        self.risk_manager.update_positions_state(data)
+                        if self.risk_manager:
+                            self.risk_manager.update_positions_state(data)
                         # v4.9 M5: No Python-side signal tracking needed.
                         # EA handles all position/trailing management independently.
                     elif topic == 'trade_confirm':
@@ -2104,9 +2051,9 @@ class BTCSFBot:
                 
                 # v19.0: Cleanup stale signals every 1 minute
                 current_time = time.time()
-                if current_time - last_cleanup_time > 30:  # 30 seconds (v26.4: faster cleanup)
+                if current_time - last_cleanup_time > 30:
                     if hasattr(self, 'ai_analyzer'):
-                        self.ai_analyzer.cleanup_stale_signals(timeout_minutes=2)  # v26.4: 2min instead of 5min
+                        self.ai_analyzer.cleanup_stale_signals(timeout_seconds=30)
                     last_cleanup_time = current_time
                 
                 await self._check_daily_report()
@@ -2122,6 +2069,69 @@ class BTCSFBot:
             await self.shutdown()
     
     # v23.1: on_ea_confirmation ถูกย้ายไป line 870 (v19.0) — ไม่ต้อง duplicate
+
+    def _reconcile_with_mt5(self):
+        """v50.8: Sync trades DB with actual MT5 positions on startup.
+
+        Rules:
+        - SIGNAL_SENT/SENT + EA ไม่มี → EA_SKIPPED (signal ไม่ถูกเปิด)
+        - SIGNAL_SENT/SENT + EA มี → OPENED (sync status)
+        - OPENED + EA มี → ไม่แก้ (ถูกต้องแล้ว)
+        - OPENED + EA ไม่มี → ไม่แก้ (รอ EA confirm ปิดเอง — ห้าม STALE_CLEANUP ทันที)
+        """
+        try:
+            if not mt5.initialize():
+                logger.warning(f"[Startup] MT5 init failed: {mt5.last_error()}")
+                return
+
+            # 1. Get actual EA positions
+            ea_positions = mt5.positions_get(symbol="BTCUSDm") or []
+            ea_signal_ids = set()
+            for p in ea_positions:
+                if p.comment:
+                    ea_signal_ids.add(p.comment)
+
+            # 2. Get DB trades with active status
+            active_trades = []
+            with self.db._conn() as conn:
+                rows = conn.execute(
+                    "SELECT signal_id, status FROM trades WHERE status IN ('SIGNAL_SENT','SENT','OPENED')"
+                ).fetchall()
+                active_trades = [(r[0], r[1]) for r in rows]
+
+            synced = {'skipped': 0, 'opened': 0, 'closed': 0}
+
+            for signal_id, status in active_trades:
+                if signal_id in ea_signal_ids:
+                    # EA has this position open
+                    if status in ('SIGNAL_SENT', 'SENT'):
+                        self.db.update_trade(signal_id, {'status': 'OPENED'})
+                        synced['opened'] += 1
+                    # status == 'OPENED' → already correct
+                else:
+                    # EA does NOT have this position
+                    if status in ('SIGNAL_SENT', 'SENT'):
+                        self.db.update_trade(signal_id, {
+                            'status': 'EA_SKIPPED',
+                            'skip_reason': 'Not found in MT5 on startup'
+                        })
+                        synced['skipped'] += 1
+                    elif status == 'OPENED':
+                        # EA ไม่มี position นี้ → หมายความว่าถูกปิดไปแล้ว (EA close ระหว่าง restart)
+                        self.db.update_trade(signal_id, {
+                            'status': 'EA_CLOSED',
+                            'exit_reason': 'Closed during bot restart (not in EA)'
+                        })
+                        synced['closed'] += 1
+                        logger.info(f"[Startup] EA_CLOSED (was OPENED): {signal_id}")
+
+            mt5.shutdown()
+            logger.info(
+                f"[Startup] MT5 Reconciled: {len(ea_positions)} EA positions, "
+                f"{synced['skipped']} SKIPPED, {synced['opened']} synced OPENED, {synced['closed']} EA_CLOSED"
+            )
+        except Exception as e:
+            logger.warning(f"[Startup] MT5 reconcile error: {e}")
 
     async def _check_daily_report(self):
         """
@@ -2213,7 +2223,8 @@ class BTCSFBot:
                     )
                 
                 # Reset daily tracking for the new day
-                self.risk_manager.position_sizer.reset_daily()
+                if self.risk_manager and self.risk_manager.position_sizer:
+                    self.risk_manager.position_sizer.reset_daily()
                 
             self.last_summary_date = today
 

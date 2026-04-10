@@ -5,7 +5,7 @@ Builds standardized Signal JSON contracts for Python → EA communication.
 
 Signal JSON Contract:
 {
-  "signal_id": "IPA_20260319_165700_LONG",
+  "signal_id": "IPA_LONG_165700",
   "mode": "IPA",           # "IPA" or "IOF"
   "direction": "LONG",     # "LONG" or "SHORT"
   "entry_price": 95000.00,
@@ -103,7 +103,7 @@ class SignalBuilder:
     # v15.4: Mode name mapping for short_reason
     MODE_SHORT = {
         'IPA': 'IPA',
-        'IPA_FRVP': 'IPAF',
+        'IPA_FRVP': 'IPA',
         'IOF': 'IOF',
         'IOF_FRVP': 'IOFF',
     }
@@ -166,12 +166,13 @@ class SignalBuilder:
             'stop_loss': sl_tp.stop_loss,
             'take_profit': sl_tp.take_profit,
             'score': score,
-            'required_rr': sl_tp.required_rr,
+            'required_rr': sl_tp.actual_rr,
             'actual_rr': sl_tp.actual_rr,
 
             # Reasons
             'sl_reason': sl_tp.sl_reason,
-            'tp_reason': sl_tp.tp2_reason,   # v6.1: main TP = TP2
+            'tp_reason': sl_tp.tp2_reason,
+            'short_reason': signal_type,   # v6.1: main TP = TP2
 
             # Classification
             'institutional_grade': institutional_grade,
@@ -258,20 +259,10 @@ class SignalBuilder:
             extra_data=extra_data,
             # v26.0: IPAF short_reason includes entry source (OB/FVG/EMA/POC)
             # IPA → 'IPA_SHORT', IPAF → 'IPAF_OB_SHORT' / 'IPAF_FVG_SHORT' / 'IPAF_EMA_SHORT'
-            short_reason=self._build_ipa_short_reason(mode, ipa_result),
+            short_reason=getattr(ipa_result, 'signal_type', 'IPA'),
         )
 
-    def _build_ipa_short_reason(self, mode: str, ipa_result) -> str:
-        """v26.0: Build short_reason with entry source for IPAF."""
-        prefix = self.MODE_SHORT.get(mode, mode)
-        direction = ipa_result.direction
-        if mode == 'IPA_FRVP':
-            sig_type = getattr(ipa_result, 'signal_type', '')
-            # Extract source: IPAF_OB → OB, IPAF_FVG → FVG, etc.
-            source = sig_type.replace('IPAF_', '') if sig_type.startswith('IPAF_') else ''
-            if source:
-                return f'{prefix}_{source}_{direction}'
-        return f'{prefix}_{direction}'
+
 
     def build_iof(self,
                   iof_result: IOFResult,
@@ -310,6 +301,17 @@ class SignalBuilder:
             # Levels
             'next_resistance': iof_result.next_resistance,
             'next_support': iof_result.next_support,
+            
+            # v39.1: MOMENTUM-specific analysis fields
+            'momentum_direction': getattr(iof_result, 'momentum_direction', ''),
+            'momentum_vs_regime': getattr(iof_result, 'momentum_vs_regime', ''),
+            'momentum_vs_m5': getattr(iof_result, 'momentum_vs_m5', ''),
+            'der_before_entry': round(getattr(iof_result, 'der_before_entry', 0.0), 3),
+            'ema_counter_before': getattr(iof_result, 'ema_counter_before', False),
+            'pullback_depth': round(getattr(iof_result, 'pullback_depth', 0.0), 3),
+            'impulse_strength': round(getattr(iof_result, 'impulse_strength', 0.0), 3),
+            'wall_proximity': round(getattr(iof_result, 'wall_proximity', 0.0), 2),
+            'entry_timing': getattr(iof_result, 'entry_timing', ''),
         }
 
         return self.build(
@@ -324,7 +326,7 @@ class SignalBuilder:
             extra_data=extra_data,
             # v15.4: short_reason ใช้ชื่อย่อ ป้องกัน cooldown block ข้ามโหมด
             # IOF → 'IOF_MOMENTUM_LONG', IOFF → 'IOFF_MOMENTUM_LONG' (ไม่ซ้ำ!)
-            short_reason=f'{self.MODE_SHORT.get(mode, mode)}_{iof_result.signal_type}_{iof_result.direction}',
+            short_reason=iof_result.signal_type,
         )
 
     def to_json_string(self, signal: Dict[str, Any]) -> str:
@@ -340,3 +342,89 @@ class SignalBuilder:
         except json.JSONDecodeError as e:
             logger.error(f"[SignalBuilder] Failed to parse JSON: {e}")
             return {}
+
+    # ==============================================
+    # v40.0: Unified build() method for SignalResult
+    # ==============================================
+
+    def build_from_result(self, signal, sl_tp) -> Dict[str, Any]:
+        """
+        v40.0: Unified build method for any SignalResult.
+        
+        Accepts either a SignalResult (v40.0) or a dict (backward compat).
+        """
+        # Support both SignalResult and dict
+        if hasattr(signal, 'signal_type'):
+            # SignalResult object
+            signal_type = signal.signal_type
+            direction = signal.direction
+            entry_price = signal.entry_price
+            score = signal.score
+            session = signal.session
+            regime = signal.regime
+            atr_m5 = signal.atr_m5
+            extra = signal.extra
+            score_breakdown = signal.score_breakdown
+
+            # Determine mode - use signal_type directly (no more IPA/IOF)
+            mode = signal_type  # e.g., MOMENTUM, REVERSAL_OB, ABSORPTION, etc.
+
+            extra_data = {
+                'signal_type': signal_type,
+                'score_breakdown': score_breakdown,
+                'wall_price': extra.get('wall_price', entry_price),
+                'wall_size_usd': extra.get('wall_size_usd', 0),
+                'der_score': round(signal.der, 2),
+                'oi_change_pct': extra.get('oi_change_pct', 0),
+                'rr_target': extra.get('rr_target', 1.0),
+                'volume_spike': extra.get('volume_spike', False),
+                'rejection_candle': extra.get('rejection_candle', False),
+                'atr_m5': round(atr_m5, 2),
+                'm5_efficiency': extra.get('m5_efficiency', 0.5),
+                'wall_scan': extra.get('wall_scan', {}),
+                'next_resistance': extra.get('next_resistance'),
+                'next_support': extra.get('next_support'),
+                'regime': regime,
+                'm5_state': signal.m5_state,
+                'h1_bias_level': signal.h1_bias_level,
+                'h1_dist_pct': signal.h1_dist_pct,
+            }
+        else:
+            # Dict (backward compat)
+            signal_type = signal.get('signal_type', signal.get('mode', 'MOMENTUM'))
+            direction = signal.get('direction', 'LONG')
+            entry_price = signal.get('entry_price', 0)
+            score = signal.get('score', 0)
+            session = signal.get('session', 'LONDON')
+            regime = signal.get('regime', 'RANGING')
+            atr_m5 = signal.get('atr_m5', 0)
+            mode = signal.get('mode', signal_type)  # v72.1: default to signal_type
+            extra_data = signal.get('extra_data', {})
+
+        # v40.3: Removed lock_group (no longer used after v40.2)
+
+        # Build signal_id
+        timestamp = datetime.now(timezone.utc).strftime('%H%M%S')
+        signal_id = f"{signal_type}_{direction}_{timestamp}"
+
+        # Build payload
+        payload = {
+            'signal_id': signal_id,
+            'mode': mode,  # backward compat for EA
+            'signal_type': signal_type,  # v40.0: new field
+            'direction': direction,
+            'entry_price': entry_price,
+            'stop_loss': sl_tp.stop_loss,
+            'take_profit': sl_tp.take_profit,
+            'score': score,
+            'required_rr': sl_tp.actual_rr,
+            'sl_reason': sl_tp.sl_reason,
+            'tp_reason': sl_tp.tp2_reason,
+            'short_reason': signal_type,
+            'institutional_grade': score >= 14,
+            'session': session,
+            'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+            'extra_data': extra_data,
+        }
+
+        return payload

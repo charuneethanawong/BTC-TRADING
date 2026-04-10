@@ -27,6 +27,7 @@ from ..signals.entry_scanner import EntrySetupScanner
 from ..risk.trailing_stop_manager import TrailingStopManager
 from ..analysis.pattern_tracker import PatternPerformanceTracker
 from ..data.trade_storage import TradeStorage
+from ..data.db_manager import get_db
 from ..enums import TrendState, BOSStatus, EntryType
 from .logistic_regression_model import LogisticRegressionModel
 
@@ -116,7 +117,7 @@ class Signal:
             f"{entry_price:.2f}",
             f"{stop_loss:.2f}",
             f"{take_profit:.2f}",
-            self.timestamp.strftime('%Y%m%d%H%M'),
+            self.timestamp.strftime('%H%M%S'),
             str(self.metadata.get('score', 0)),
             self.metadata.get('setup_id', '')
         ]
@@ -275,10 +276,10 @@ class SignalManager:
         # Load state on init
         self.load_state()
     
-    def save_state(self, filepath: str = "data/signal_state.json") -> bool:
-        """Save signal management state to JSON file."""
+    def save_state(self) -> bool:
+        """Save signal management state to database (v36.2)."""
         try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            db = get_db()
             
             # Convert datetime objects in active_setups to strings
             serializable_setups = {
@@ -304,21 +305,19 @@ class SignalManager:
                 'last_entry_price': self.last_entry_price
             }
             
-            with open(filepath, 'w') as f:
-                json.dump(state, f, indent=4)
+            db.set_state('signal_manager', state)
             return True
         except Exception as e:
-            logger.error(f"Error saving SignalManager state: {e}")
+            logger.error(f"Error saving SignalManager state to DB: {e}")
             return False
 
-    def load_state(self, filepath: str = "data/signal_state.json") -> bool:
-        """Load signal management state from JSON file."""
-        if not os.path.exists(filepath):
-            return False
-            
+    def load_state(self) -> bool:
+        """Load signal management state from database (v36.2)."""
         try:
-            with open(filepath, 'r') as f:
-                state = json.load(f)
+            db = get_db()
+            state = db.get_state('signal_manager')
+            if not state:
+                return False
             
             # Convert strings back to datetime objects
             loaded_setups = state.get('active_setups', {})
@@ -335,17 +334,23 @@ class SignalManager:
                         'price': v['price'],
                         'time': datetime.fromisoformat(v['time'])
                     }
-                elif isinstance(v, (int, float)): # Legacy format
+                elif isinstance(v, (int, float)):  # Legacy format
                     self.last_pattern_prices[k] = {
                         'price': float(v),
-                        'time': datetime.now(timezone.utc) - timedelta(minutes=60) # Assume old
-                    }
+                        'time': datetime.now(timezone.utc) - timedelta(minutes=60)
+                    }  # Assume old
             
             last_signal_time_str = state.get('last_signal_time')
             if last_signal_time_str:
                 self.last_signal_time = datetime.fromisoformat(last_signal_time_str)
             
             self.last_entry_price = state.get('last_entry_price', 0)
+            
+            logger.info(f"SignalManager state loaded from DB: {len(self.active_setups)} setups, {len(self.last_pattern_prices)} patterns")
+            return True
+        except Exception as e:
+            logger.error(f"Error loading SignalManager state from DB: {e}")
+            return False
             
 
             return True
