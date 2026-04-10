@@ -156,10 +156,14 @@ class VPBounceDetector(BaseDetector):
             self.last_reject_reason = f'Level proximity — waiting for reaction at {level_type}'
             return []
 
-        # Direction from reaction
-        if reaction in ('FALSE_BO_UP', 'REJECT_UP', 'BREAK_UP'):
+        # Direction from reaction (Reject Breakouts, only allow False BO and Rejections)
+        if reaction in ('BREAK_UP', 'BREAK_DOWN'):
+            self.last_reject_reason = f'Price broke through {level_type} without rejection ({reaction}) — not a bounce'
+            return []
+
+        if reaction in ('FALSE_BO_UP', 'REJECT_UP'):
             direction = 'LONG'
-        elif reaction in ('FALSE_BO_DOWN', 'REJECT_DOWN', 'BREAK_DOWN'):
+        elif reaction in ('FALSE_BO_DOWN', 'REJECT_DOWN'):
             direction = 'SHORT'
         else:
             self.last_reject_reason = f'Unclear reaction: {reaction}'
